@@ -126,16 +126,30 @@ function openAddPersonModal(day){
           <option value="">— choose —</option>
           ${DATA.employees.map(e=>`<option value="${e.id}">${e.firstName} ${e.lastName} (${e.status})</option>`).join('')}
           ${session.role==='manager'?`<option value="__self__">${session.name} (me)</option>`:''}
+          <option value="__new__">+ New person…</option>
         </select>
       </div>
+      <div id="p_newFields" style="display:none;">
+        <div class="field"><label>First name</label><input id="p_fn"></div>
+        <div class="field"><label>Last name</label><input id="p_ln"></div>
+      </div>
       <div class="field"><label>Status on shift</label><select id="p_status"><option>Canvasser</option><option>Supervisor</option><option>Manager</option></select></div>
-      <p class="small muted">Need to add someone new? Do that once in the Team tab, then come back here to assign them.</p>
       <div class="modal-actions"><button class="btn" id="p_cancel">Cancel</button><button class="btn btn-accent" id="p_save">Add</button></div>
       <input type="hidden" id="p_day" value="${day}">
     `
   };
   render();
 }
+
+window.moduleModalAttachers.push(function attachSchedulePersonSelectModal(){
+  const empSel = document.getElementById('p_emp');
+  if(empSel){
+    empSel.onchange = ()=>{
+      const box = document.getElementById('p_newFields');
+      if(box) box.style.display = empSel.value==='__new__' ? 'block' : 'none';
+    };
+  }
+});
 
 window.moduleModalAttachers.push(function attachScheduleModals(){
   const tSave = document.getElementById('t_save');
@@ -160,11 +174,20 @@ window.moduleModalAttachers.push(function attachScheduleModals(){
       const day = document.getElementById('p_day').value;
       const status = document.getElementById('p_status').value;
       const empSel = document.getElementById('p_emp');
-      if(!empSel.value) return;
-      const name = empSel.value==='__self__' ? session.name : (()=>{
+      let name;
+      if(empSel.value==='__self__'){
+        name = session.name;
+      } else if(empSel.value==='__new__'){
+        const fn = document.getElementById('p_fn').value.trim();
+        const ln = document.getElementById('p_ln').value.trim();
+        if(!fn) throw new Error('Enter at least a first name.');
+        const newEmp = await gsRun('addEmployee', fn, ln, status, 'Canvasser', '', '0000');
+        DATA.employees.push(newEmp);
+        name = fn + ' ' + ln;
+      } else if(empSel.value){
         const emp = DATA.employees.find(e=>e.id===empSel.value);
-        return emp.firstName+' '+emp.lastName;
-      })();
+        name = emp.firstName+' '+emp.lastName;
+      } else { return; }
       await gsRun('addPersonToDay', day, name, status);
       delete scheduleCache[ui.weekMonday];
       await loadWeek(ui.weekMonday);
