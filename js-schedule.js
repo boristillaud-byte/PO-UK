@@ -51,6 +51,7 @@ function renderSchedulePage(){
   }
   const totalsRows = Object.keys(totals).sort().map(k=>`<tr><td>${k}</td><td class="mono">${totals[k].toFixed(2)}h</td></tr>`).join('') ||
     `<tr><td colspan="2" class="muted">No shifts scheduled this week yet.</td></tr>`;
+  const grandTotal = Object.values(totals).reduce((sum, h) => sum + h, 0);
 
   return `
     <div class="page-head"><div><h2>Schedule</h2><div class="desc">${session.role==='manager'?'Set each day\'s shift time once, then add the people working that day.':'View your assigned shifts for the week.'}</div></div></div>
@@ -63,6 +64,10 @@ function renderSchedulePage(){
     <div class="day-grid">${dayCols}</div>
     <div class="panel">
       <div class="panel-title">Weekly hours total</div>
+      <div style="display:flex;align-items:baseline;gap:10px;margin-bottom:16px;">
+        <div style="font-size:32px;font-weight:800;">${grandTotal.toFixed(2)}h</div>
+        <div class="small muted">all team members combined, this week</div>
+      </div>
       <table><thead><tr><th>Person</th><th>Hours</th></tr></thead><tbody>${totalsRows}</tbody></table>
     </div>
   `;
@@ -117,22 +122,18 @@ function openSetTimeModal(day){
   render();
 }
 
-function openAddPersonModal(day){
+function openAddPersonModal(day, preselectId){
   ui.modal = {
     title:`Add person · ${fmtDate(day)}`,
     body:`
       <div class="field"><label>Person</label>
         <select id="p_emp">
           <option value="">— choose —</option>
-          ${DATA.employees.map(e=>`<option value="${e.id}">${e.firstName} ${e.lastName} (${e.status})</option>`).join('')}
+          ${DATA.employees.map(e=>`<option value="${e.id}" ${preselectId===e.id?'selected':''}>${e.firstName} ${e.lastName} (${e.status})</option>`).join('')}
           ${session.role==='manager'?`<option value="__self__">${session.name} (me)</option>`:''}
-          <option value="__new__">+ New person…</option>
         </select>
       </div>
-      <div id="p_newFields" style="display:none;">
-        <div class="field"><label>First name</label><input id="p_fn"></div>
-        <div class="field"><label>Last name</label><input id="p_ln"></div>
-      </div>
+      <button class="btn btn-sm" id="p_newPersonBtn" style="margin:-4px 0 14px;">+ New person…</button>
       <div class="field"><label>Status on shift</label><select id="p_status"><option>Canvasser</option><option>Supervisor</option><option>Manager</option></select></div>
       <div class="modal-actions"><button class="btn" id="p_cancel">Cancel</button><button class="btn btn-accent" id="p_save">Add</button></div>
       <input type="hidden" id="p_day" value="${day}">
@@ -141,13 +142,40 @@ function openAddPersonModal(day){
   render();
 }
 
+function openNewPersonModal(day){
+  ui.modal = {
+    title:'New person',
+    body:`
+      <div class="field"><label>First name</label><input id="np_fn"></div>
+      <div class="field"><label>Last name</label><input id="np_ln"></div>
+      <div class="field"><label>Schedule status</label><select id="np_status"><option>Canvasser</option><option>Supervisor</option><option>Manager</option></select></div>
+      <p class="small muted">You can set their login PIN and login role afterward in the Team tab.</p>
+      <div class="modal-actions"><button class="btn" id="np_cancel">Cancel</button><button class="btn btn-accent" id="np_save">Create</button></div>
+      <input type="hidden" id="np_day" value="${day}">
+    `
+  };
+  render();
+}
+
 window.moduleModalAttachers.push(function attachSchedulePersonSelectModal(){
-  const empSel = document.getElementById('p_emp');
-  if(empSel){
-    empSel.onchange = ()=>{
-      const box = document.getElementById('p_newFields');
-      if(box) box.style.display = empSel.value==='__new__' ? 'block' : 'none';
-    };
+  const newBtn = document.getElementById('p_newPersonBtn');
+  if(newBtn){
+    const day = document.getElementById('p_day').value;
+    newBtn.onclick = ()=> openNewPersonModal(day);
+  }
+  const npSave = document.getElementById('np_save');
+  if(npSave){
+    document.getElementById('np_cancel').onclick = closeModal;
+    npSave.onclick = ()=> safeAction(async ()=>{
+      const day = document.getElementById('np_day').value;
+      const fn = document.getElementById('np_fn').value.trim();
+      const ln = document.getElementById('np_ln').value.trim();
+      const status = document.getElementById('np_status').value;
+      if(!fn) throw new Error('Enter at least a first name.');
+      const newEmp = await gsRun('addEmployee', fn, ln, status, 'Canvasser', '', '0000');
+      DATA.employees.push(newEmp);
+      openAddPersonModal(day, newEmp.id);
+    });
   }
 });
 
@@ -170,28 +198,47 @@ window.moduleModalAttachers.push(function attachScheduleModals(){
   const pSave = document.getElementById('p_save');
   if(pSave){
     document.getElementById('p_cancel').onclick = closeModal;
-    pSave.onclick = ()=> safeAction(async ()=>{
+    pSave.onclick = ()=>{
       const day = document.getElementById('p_day').value;
       const status = document.getElementById('p_status').value;
       const empSel = document.getElementById('p_emp');
-      let name;
+      let name, isNew=false, fn='', ln='';
       if(empSel.value==='__self__'){
         name = session.name;
       } else if(empSel.value==='__new__'){
-        const fn = document.getElementById('p_fn').value.trim();
-        const ln = document.getElementById('p_ln').value.trim();
-        if(!fn) throw new Error('Enter at least a first name.');
-        const newEmp = await gsRun('addEmployee', fn, ln, status, 'Canvasser', '', '0000');
-        DATA.employees.push(newEmp);
-        name = fn + ' ' + ln;
+        fn = document.getElementById('p_fn').value.trim();
+        ln = document.getElementById('p_ln').value.trim();
+        if(!fn){ alert('Enter at least a first name.'); return; }
+        name = (fn+' '+ln).trim();
+        isNew = true;
       } else if(empSel.value){
         const emp = DATA.employees.find(e=>e.id===empSel.value);
         name = emp.firstName+' '+emp.lastName;
       } else { return; }
-      await gsRun('addPersonToDay', day, name, status);
-      delete scheduleCache[ui.weekMonday];
-      await loadWeek(ui.weekMonday);
+
+      // Show the person on screen immediately (before the server confirms)
+      // so adding someone feels instant. We quietly reconcile with the
+      // real server data right after, whether the save succeeds or not.
+      const dayData = scheduleCache[ui.weekMonday] && scheduleCache[ui.weekMonday][day];
+      if(dayData){
+        const t = dayData.time;
+        const optimisticHours = t ? computeHours(t.start, t.end, t.breakMin) : 0;
+        dayData.people.push({row:-1, employeeName:name, status, hours:optimisticHours});
+      }
       closeModal();
-    });
+
+      safeAction(async ()=>{
+        if(isNew){
+          const res = await gsRun('addNewPersonAndAssign', day, fn, ln, status);
+          DATA.employees.push(res.employee);
+        } else {
+          await gsRun('addPersonToDay', day, name, status);
+        }
+      }).finally(async ()=>{
+        delete scheduleCache[ui.weekMonday];
+        await loadWeek(ui.weekMonday);
+        render();
+      });
+    };
   }
 });
