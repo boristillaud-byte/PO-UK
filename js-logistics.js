@@ -2,8 +2,17 @@
    LOGISTICS TAB (manager only)
    ========================================================= */
 function renderLogisticsPage(){
-  const cities = DATA.cities;
-  const city = ui.city || cities[0];
+  const editable = canEdit();
+  /* Only a Director may move between cities; everyone else is pinned to their
+     own, so we don't draw a tab strip they aren't allowed to use. */
+  const cities = canSeeAllCities() ? (DATA.cities || []) : (myCity() ? [myCity()] : []);
+  if(!canSeeAllCities()) ui.city = myCity();
+  if(!cities.length){
+    return `<div class="page-head"><div><h2>Logistics</h2></div></div>
+      <div class="empty-state"><div class="ico">🏙</div>No city is set on your record.<br><span class="small">Ask a manager to set your city in the Team tab.</span></div>`;
+  }
+  if(!ui.city || cities.indexOf(ui.city) === -1) ui.city = cities[0];
+  const city = ui.city;
   const cdata = DATA.logistics.cities[city] || {tablets:[], vests:0, lastCheck:null};
   const lastCheck = cdata.lastCheck;
   let bannerHtml = '';
@@ -20,31 +29,31 @@ function renderLogisticsPage(){
   return `
     <div class="page-head">
       <div><h2>Logistics</h2><div class="desc">Track tablets, vests and equipment by city. A reminder email goes out automatically if a city goes 7+ days without a check.</div></div>
-      <button class="btn btn-sm" id="addCity">+ Add city</button>
+      ${editable && canSeeAllCities() ? '<button class="btn btn-sm" id="addCity">+ Add city</button>' : ''}
     </div>
-    <div class="city-tabs">${cities.map(c=>`<div class="city-tab ${c===city?'active':''}" data-city="${c}">${c}</div>`).join('')}</div>
+    ${cities.length>1 ? `<div class="city-tabs">${cities.map(c=>`<div class="city-tab ${c===city?'active':''}" data-city="${c}">${c}</div>`).join('')}</div>` : `<div class="small muted" style="margin-bottom:14px;">📍 ${esc(city)}</div>`}
     ${bannerHtml}
     <div class="grid2">
       <div class="panel">
         <div class="panel-title">Tablets in ${city}</div>
         <ul class="equip-list">${tabletsHtml}</ul>
-        <div style="display:flex;gap:8px;margin-top:14px;">
+        ${editable ? `<div style="display:flex;gap:8px;margin-top:14px;">
           <button class="btn btn-sm" id="addTablet">+ Add tablet</button>
           <button class="btn btn-sm" id="transferTablet">Transfer tablet</button>
-        </div>
+        </div>` : ''}
       </div>
       <div class="panel">
         <div class="panel-title">Vests in ${city}</div>
         <div style="font-size:34px;font-weight:800;">${cdata.vests||0}</div>
         <div class="small muted" style="margin-bottom:10px;">current count</div>
-        <button class="btn btn-sm" id="adjustVests">+/- Adjust vests</button>
+        ${editable ? '<button class="btn btn-sm" id="adjustVests">+/- Adjust vests</button>' : ''}
       </div>
     </div>
-    <div class="panel">
+    ${editable ? `<div class="panel">
       <div class="panel-title">Daily check</div>
       <p class="small muted">Confirm today that the equipment listed above is physically present in ${city}.</p>
       <button class="btn btn-accent" id="confirmEquip">Confirm equipment present today</button>
-    </div>
+    </div>` : ''}
     <div class="panel"><div class="panel-title">Activity log</div><table><thead><tr><th>Date</th><th>Action</th></tr></thead><tbody>${log}</tbody></table></div>
   `;
 }
@@ -61,15 +70,19 @@ window.tabRefreshers.logistics = async function(){
 };
 
 function attachLogisticsEvents(){
+  if(!document.querySelector('#content .panel')) return; // the "no city" state has no controls
   document.querySelectorAll('.city-tab').forEach(t=> t.onclick = ()=>{ ui.city=t.dataset.city; render(); });
-  document.getElementById('addCity').onclick = ()=>{
+  // Viewers (Team Leader / Senior Team Leader) get no action buttons at all,
+  // so every handler below is bound only if its button was rendered.
+  const $ = (id)=> document.getElementById(id);
+  if($('addCity')) $('addCity').onclick = ()=>{
     ui.modal = { title:'Add city', body:`
       <div class="field"><label>City name</label><input id="cityadd_name" placeholder="e.g. Edinburgh"></div>
       <div class="modal-actions"><button class="btn" id="cityadd_cancel">Cancel</button><button class="btn btn-accent" id="cityadd_save">Add</button></div>
     `};
     render();
   };
-  document.getElementById('addTablet').onclick = ()=>{
+  if($('addTablet')) $('addTablet').onclick = ()=>{
     ui.modal = { title:`Add tablet · ${ui.city}`, body:`
       <div class="field"><label>Tablet ID</label><input id="tab_id" placeholder="e.g. 2153"></div>
       <div class="field"><label>Date (YYYY-MM-DD)</label><input type="text" inputmode="numeric" id="tab_date" value="${todayISO()}" placeholder="${todayISO()}"></div>
@@ -77,7 +90,7 @@ function attachLogisticsEvents(){
     `};
     render();
   };
-  document.getElementById('transferTablet').onclick = ()=>{
+  if($('transferTablet')) $('transferTablet').onclick = ()=>{
     const cdata = DATA.logistics.cities[ui.city];
     const others = DATA.cities.filter(c=>c!==ui.city);
     ui.modal = { title:`Transfer tablet from ${ui.city}`, body:`
@@ -88,7 +101,7 @@ function attachLogisticsEvents(){
     `};
     render();
   };
-  document.getElementById('adjustVests').onclick = ()=>{
+  if($('adjustVests')) $('adjustVests').onclick = ()=>{
     ui.modal = { title:`Adjust vests · ${ui.city}`, body:`
       <div class="field"><label>Change (negative to remove, e.g. -2)</label><input type="number" id="ve_delta" value="1"></div>
       <div class="field"><label>Reason (optional)</label><input id="ve_reason" placeholder="e.g. 5 UNICEF vests received"></div>
@@ -97,10 +110,12 @@ function attachLogisticsEvents(){
     `};
     render();
   };
-  document.getElementById('confirmEquip').onclick = ()=> safeAction(async ()=>{
-    await gsRun('confirmEquipmentCheck', ui.city, session.name);
-    await refreshLogistics();
-  });
+  if($('confirmEquip')) $('confirmEquip').onclick = function(){
+    safeButtonAction(this, 'Confirming…', async ()=>{
+      await gsRun('confirmEquipmentCheck', ui.city, session.name);
+      await refreshLogistics();
+    }, 'Equipment confirmed for ' + ui.city);
+  };
 }
 window.moduleModalAttachers.push(function attachLogisticsModals(){
   const cityAddSave = document.getElementById('cityadd_save');
