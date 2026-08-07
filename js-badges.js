@@ -7,10 +7,15 @@ let badgeLogoImg = null;
 let currentAutoBadgeId = ''; // Garde en mémoire le prochain ID pour la ville en cours
 
 function renderBadgesPage(){
-  const logRows = DATA.badgeLog.map(b=>`<tr><td class="mono">${b.id}</td><td>${b.name}</td><td>${b.campaign||''}</td><td>${b.city||''}</td><td class="small">${fmtDate(b.date)}</td></tr>`).join('') || `<tr><td colspan="5" class="muted">No badges generated yet.</td></tr>`;
+  const visibleLog = canSeeAllCities() ? DATA.badgeLog
+    : DATA.badgeLog.filter(b => String(b.city||'').trim().toLowerCase() === myCity().toLowerCase());
+  const logRows = visibleLog.map(b=>`<tr><td class="mono">${b.id}</td><td>${b.name}</td><td>${b.campaign||''}</td><td>${b.city||''}</td><td class="small">${fmtDate(b.date)}</td></tr>`).join('') || `<tr><td colspan="5" class="muted">No badges generated yet.</td></tr>`;
   const campaignOptions = DATA.campaigns.map(c=>`<option value="${c.name}">${c.name}</option>`).join('') || '<option value="">No campaigns configured</option>';
   
-  const cityOptions = (DATA.cities || []).map(c => `<option value="${c}">${c}</option>`).join('') || '<option value="">No cities configured</option>';
+  /* A badge belongs to a city (its number is prefixed from it), so the list
+     is restricted the same way every other tab is. */
+  const allowedCities = canSeeAllCities() ? (DATA.cities || []) : (myCity() ? [myCity()] : []);
+  const cityOptions = allowedCities.map(c => `<option value="${c}">${c}</option>`).join('') || '<option value="">No cities configured</option>';
 
   return `
     <div class="page-head"><div><h2>Employee Badges</h2><div class="desc">Generate a printable ID badge per city prefix (e.g. GL1001, LD1001).</div></div></div>
@@ -24,7 +29,7 @@ function renderBadgesPage(){
         </div>
         <div style="flex:1;min-width:240px;">
           <div class="field"><label>Campaign</label><select id="bg_campaign">${campaignOptions}</select></div>
-          <div class="field"><label>City</label><select id="bg_city">${cityOptions}</select></div>
+          <div class="field"><label>City</label><select id="bg_city" ${allowedCities.length===1?'disabled':''}>${cityOptions}</select></div>
           <div class="field"><label>Select Employee (Filtered by city)</label><select id="bg_emp_select"></select></div>
           <div class="field"><label>Full name</label><input id="bg_name" placeholder="e.g. Mohammed Ilyas"></div>
           <div class="field"><label>Photo</label><input type="file" id="bg_photo" accept="image/*"></div>
