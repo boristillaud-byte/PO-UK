@@ -1,17 +1,64 @@
 /* =========================================================
-   SCHEDULE TAB
-   One shift time per day, applied to everyone working that day.
-   Adding a person is just a name + status pick — no dynamic fields.
+   SCHEDULE TAB — one schedule per city
 
-   EOD (End of Day): per person per day, a manager records the actual
+   Each city has its own week grid. Within a city, each day has ONE shift
+   time that applies to everyone working that day there.
+
+   Who sees what:
+   - Senior Manager / Director: a tab per city, plus an "All cities" tab that
+     totals the week across every city.
+   - Everyone else: their own city only, no city tabs to get lost in.
+   - Fundraiser: totals only. The per-person £RCP breakdown is hidden, because
+     the Fundraiser login is shared and has no PIN — publishing everyone's
+     performance behind an unauthenticated door would be a poor trade.
+
+   EOD (End of Day): per person per day per city, a manager records the actual
    canvass hours, admin hours, #RCP and £RCP. £RCP/h is always derived
    (£RCP / canvass hours) and never stored, so it can't go stale.
    ========================================================= */
-async function loadWeek(monday){
-  if(!scheduleCache[monday]){
-    scheduleCache[monday] = await gsRun('getWeekSchedule', monday);
-  }
-  return scheduleCache[monday];
+
+const ALL_CITIES = '__ALL__';
+let summaryCache = {};   // monday -> getWeekSummary result
+
+function weekKey(monday, city){ return monday + '|' + city; }
+
+/** Cities this person may switch between on the schedule. */
+function scheduleCityTabs(){
+  if(canSeeAllCities()) return [ALL_CITIES].concat(DATA.cities || []);
+  return myCity() ? [myCity()] : [];
+}
+/** Per-person EOD figures are for Team Leader and above. */
+function canSeePersonFigures(){ return myLevel() >= 2; }
+
+/** Picks a sane starting city, and repairs an impossible one. */
+function normalizeScheduleCity(){
+  const tabs = scheduleCityTabs();
+  if(!tabs.length){ ui.scheduleCity = null; return; }
+  if(!ui.scheduleCity || tabs.indexOf(ui.scheduleCity) === -1) ui.scheduleCity = tabs[0];
+}
+
+async function loadWeek(monday, city){
+  const k = weekKey(monday, city);
+  if(!scheduleCache[k]) scheduleCache[k] = await gsRun('getWeekSchedule', monday, city);
+  return scheduleCache[k];
+}
+async function loadSummary(monday){
+  if(!summaryCache[monday]) summaryCache[monday] = await gsRun('getWeekSummary', monday);
+  return summaryCache[monday];
+}
+/** Fetches whatever the current view needs. */
+async function ensureScheduleData(){
+  normalizeScheduleCity();
+  if(!ui.scheduleCity) return;
+  if(ui.scheduleCity === ALL_CITIES) await loadSummary(ui.weekMonday);
+  else await loadWeek(ui.weekMonday, ui.scheduleCity);
+}
+async function reloadScheduleData(){
+  if(ui.scheduleCity === ALL_CITIES) delete summaryCache[ui.weekMonday];
+  else delete scheduleCache[weekKey(ui.weekMonday, ui.scheduleCity)];
+  // A change in one city moves the all-cities totals too.
+  delete summaryCache[ui.weekMonday];
+  await ensureScheduleData();
 }
 
 function normalizeTime(raw){
@@ -43,7 +90,6 @@ function rateOf(rcpValue, canvassHours){
 }
 function fmtRate(r){ return r === null ? '—' : fmtGBP(r) + '/h'; }
 
-/* Builds {employeeName -> eod entry} for one day. */
 function eodMap(day){
   const m = {};
   (day.eod || []).forEach(e => { m[e.employeeName] = e; });
@@ -51,9 +97,9 @@ function eodMap(day){
 }
 
 /* ---------------------------------------------------------
-   WEEK ROLL-UP used by the Weekly resume panel.
-   Per the agreed rule: if an EOD exists for a person on a day, its hours
-   (canvass + admin) replace that day's scheduled hours for that person.
+   WEEK ROLL-UP for one city's Weekly resume.
+   If an EOD exists for a person on a day, its hours (canvass + admin)
+   replace that day's scheduled hours for that person.
    --------------------------------------------------------- */
 function buildWeekTotals(week){
   const byPerson = {};
@@ -80,7 +126,6 @@ function buildWeekTotals(week){
         s.hours += num(p.hours);
       }
     });
-    // An EOD for someone no longer on the day's roster still counts.
     (day.eod || []).forEach(e => {
       if(day.people.some(p => p.employeeName === e.employeeName)) return;
       const s = slot(e.employeeName);
@@ -101,26 +146,38 @@ function buildWeekTotals(week){
   return {people, totals:t};
 }
 
+function statTiles(t, rate, subLine){
+  return `
+    <div class="stat-row">
+      <div class="stat"><div class="k">Total hours</div><div class="v mono">${num(t.hours).toFixed(2)}h</div>
+        <div class="sub">${num(t.canvass).toFixed(2)}h canvass · ${num(t.admin).toFixed(2)}h admin</div></div>
+      <div class="stat"><div class="k">#RCP</div><div class="v mono">${num(t.rcpCount)}</div>
+        <div class="sub">${subLine}</div></div>
+      <div class="stat"><div class="k">£RCP</div><div class="v mono">${fmtGBP(t.rcpValue)}</div>
+        <div class="sub">${num(t.rcpCount)>0?fmtGBP(num(t.rcpValue)/num(t.rcpCount))+' avg':'—'}</div></div>
+      <div class="stat stat-hi"><div class="k">£RCP / h</div><div class="v mono">${rate===null||rate===undefined?'—':fmtGBP(rate)}</div>
+        <div class="sub">£RCP / canvass hours</div></div>
+    </div>`;
+}
+
 function renderWeeklyResume(week){
   const {people, totals} = buildWeekTotals(week);
   const rate = rateOf(totals.rcpValue, totals.canvass);
+  const tiles = statTiles(totals, rate, `${totals.eodDays} EOD${totals.eodDays===1?'':'s'} recorded`);
 
-  const tiles = `
-    <div class="stat-row">
-      <div class="stat"><div class="k">Total hours</div><div class="v mono">${totals.hours.toFixed(2)}h</div>
-        <div class="sub">${totals.canvass.toFixed(2)}h canvass · ${totals.admin.toFixed(2)}h admin</div></div>
-      <div class="stat"><div class="k">#RCP</div><div class="v mono">${totals.rcpCount}</div>
-        <div class="sub">${totals.eodDays} EOD${totals.eodDays===1?'':'s'} recorded</div></div>
-      <div class="stat"><div class="k">£RCP</div><div class="v mono">${fmtGBP(totals.rcpValue)}</div>
-        <div class="sub">${totals.rcpCount>0?fmtGBP(totals.rcpValue/totals.rcpCount)+' avg':'—'}</div></div>
-      <div class="stat stat-hi"><div class="k">£RCP / h</div><div class="v mono">${rate===null?'—':fmtGBP(rate)}</div>
-        <div class="sub">£RCP / canvass hours</div></div>
+  /* Fundraisers get the city totals but not the person-by-person breakdown. */
+  if(!canSeePersonFigures()){
+    return `<div class="panel">
+      <div class="panel-title">Weekly resume · ${esc(ui.scheduleCity)}</div>
+      ${tiles}
+      <div class="small muted" style="margin-top:12px;">City totals for the week. Individual figures are only visible to team leaders and managers.</div>
     </div>`;
+  }
 
   const rows = people.map(p => {
     const r = rateOf(p.rcpValue, p.canvass);
     return `<tr>
-      <td>${p.name}</td>
+      <td>${esc(p.name)}</td>
       <td class="mono">${p.hours.toFixed(2)}h</td>
       <td class="mono">${p.canvass>0?p.canvass.toFixed(2)+'h':'<span class="muted">—</span>'}</td>
       <td class="mono">${p.admin>0?p.admin.toFixed(2)+'h':'<span class="muted">—</span>'}</td>
@@ -144,7 +201,7 @@ function renderWeeklyResume(week){
 
   return `
     <div class="panel">
-      <div class="panel-title">Weekly resume</div>
+      <div class="panel-title">Weekly resume · ${esc(ui.scheduleCity)}</div>
       ${tiles}
       <div class="panel-sub">Detail by person</div>
       <table class="resume-table">
@@ -159,24 +216,78 @@ function renderWeeklyResume(week){
     </div>`;
 }
 
-function renderSchedulePage(){
-  const week = scheduleCache[ui.weekMonday] || {};
-  const sunday = shiftDate(ui.weekMonday,6);
-  const isManager = session.role==='manager';
+/* ---------------------------------------------------------
+   ALL CITIES OVERVIEW (Senior Manager / Director)
+   One row per city for the selected week, plus the grand total.
+   --------------------------------------------------------- */
+function renderCityOverview(){
+  const sum = summaryCache[ui.weekMonday];
+  if(!sum) return `<div class="panel"><div class="small muted">Loading the week…</div></div>`;
+
+  const rows = sum.cities.map(c=>`
+    <tr>
+      <td><button class="btn btn-sm" data-gotocity="${esc(c.city)}">${esc(c.city)} ›</button></td>
+      <td class="mono">${num(c.hours).toFixed(2)}h</td>
+      <td class="mono">${c.canvass>0?num(c.canvass).toFixed(2)+'h':'<span class="muted">—</span>'}</td>
+      <td class="mono">${c.admin>0?num(c.admin).toFixed(2)+'h':'<span class="muted">—</span>'}</td>
+      <td class="mono">${c.rcpCount||'<span class="muted">—</span>'}</td>
+      <td class="mono">${c.rcpValue>0?fmtGBP(c.rcpValue):'<span class="muted">—</span>'}</td>
+      <td class="mono">${c.rcpPerHour===null?'—':fmtGBP(c.rcpPerHour)+'/h'}</td>
+      <td class="small muted">${c.peopleCount}</td>
+    </tr>`).join('') || `<tr><td colspan="8" class="muted">No cities configured yet — add them in Logistics.</td></tr>`;
+
+  const t = sum.total;
+  const foot = sum.cities.length ? `<tfoot><tr class="tot">
+      <td>All cities</td>
+      <td class="mono">${num(t.hours).toFixed(2)}h</td>
+      <td class="mono">${num(t.canvass).toFixed(2)}h</td>
+      <td class="mono">${num(t.admin).toFixed(2)}h</td>
+      <td class="mono">${num(t.rcpCount)}</td>
+      <td class="mono">${fmtGBP(t.rcpValue)}</td>
+      <td class="mono">${t.rcpPerHour===null?'—':fmtGBP(t.rcpPerHour)+'/h'}</td>
+      <td class="small muted">${num(t.peopleCount)}</td>
+    </tr></tfoot>` : '';
+
+  return `
+    <div class="panel">
+      <div class="panel-title">All cities · week of ${fmtDate(ui.weekMonday)}</div>
+      ${statTiles(t, t.rcpPerHour, `${num(t.eodCount)} EOD${num(t.eodCount)===1?'':'s'} recorded`)}
+      <div class="panel-sub">By city</div>
+      <table class="resume-table">
+        <thead><tr>
+          <th>City</th><th>Hours</th><th>Canvass h</th><th>Admin h</th>
+          <th>#RCP</th><th>£RCP</th><th>£RCP/h</th><th>People</th>
+        </tr></thead>
+        <tbody>${rows}</tbody>
+        ${foot}
+      </table>
+      <div class="small muted" style="margin-top:10px;">£RCP/h per city is that city's £RCP divided by its own canvass hours; the all-cities figure divides the combined totals, so it is not the average of the three. Click a city to open its schedule.</div>
+    </div>`;
+}
+
+/* ---------------------------------------------------------
+   THE WEEK GRID for one city
+   --------------------------------------------------------- */
+function renderCityWeek(){
+  const week = scheduleCache[weekKey(ui.weekMonday, ui.scheduleCity)];
+  if(!week) return `<div class="panel"><div class="small muted">Loading ${esc(ui.scheduleCity)}…</div></div>`;
+
+  const canWrite = canEdit();
+  const showFigures = canSeePersonFigures();
   let dayCols = '';
   for(let i=0;i<7;i++){
     const dateIso = shiftDate(ui.weekMonday,i);
     const day = week[dateIso] || {time:null, people:[], eod:[]};
     const em = eodMap(day);
     const timeLine = day.time
-      ? `<div class="small" style="padding:6px 8px;background:#F4F4F4;border-radius:6px;margin-bottom:6px;">${day.time.start}–${day.time.end}${day.time.breakMin>0?` (break ${day.time.breakMin}m)`:''} ${isManager?`<button class="btn btn-sm" data-settime="${dateIso}" style="float:right;padding:2px 8px;">Edit</button>`:''}</div>`
-      : (isManager ? `<button class="add-shift-btn" data-settime="${dateIso}" style="margin-bottom:6px;">+ Set shift time</button>` : `<div class="small muted" style="margin-bottom:6px;">No shift time set</div>`);
+      ? `<div class="small" style="padding:6px 8px;background:#F4F4F4;border-radius:6px;margin-bottom:6px;">${day.time.start}–${day.time.end}${day.time.breakMin>0?` (break ${day.time.breakMin}m)`:''} ${canWrite?`<button class="btn btn-sm" data-settime="${dateIso}" style="float:right;padding:2px 8px;">Edit</button>`:''}</div>`
+      : (canWrite ? `<button class="add-shift-btn" data-settime="${dateIso}" style="margin-bottom:6px;">+ Set shift time</button>` : `<div class="small muted" style="margin-bottom:6px;">No shift time set</div>`);
 
     const peopleHtml = day.people.map(p=>{
-      const mine = session.role==='canvasser' && p.employeeName===session.name;
+      const mine = !isAnonymous() && p.employeeName===session.name;
       const isPending = pendingRows.has(p.row);
       const e = em[p.employeeName];
-      const eodLine = e ? `<div class="eod-mini">
+      const eodLine = (e && showFigures) ? `<div class="eod-mini">
           <span>C <strong>${num(e.canvassHours).toFixed(2)}h</strong></span>
           <span>A <strong>${num(e.adminHours).toFixed(2)}h</strong></span>
           <span>#<strong>${num(e.rcpCount)}</strong></span>
@@ -184,27 +295,27 @@ function renderSchedulePage(){
           <span class="rate">${fmtRate(rateOf(e.rcpValue, e.canvassHours))}</span>
         </div>` : '';
       return `<div class="shift-card ${isPending?'is-pending':''}" style="${mine?'border-left-color:#2256B0;background:#F4F8FF;':''}">
-        ${isManager?`<button class="rm" data-row="${p.row}" data-day="${dateIso}" data-name="${p.employeeName}" title="Remove from this day">×</button>`:''}
-        <div class="nm">${p.employeeName} <span class="badge-tag tag-${p.status.toLowerCase()}">${p.status}</span></div>
+        ${canWrite?`<button class="rm" data-row="${p.row}" data-day="${dateIso}" data-name="${esc(p.employeeName)}" title="Remove from this day">×</button>`:''}
+        <div class="nm">${esc(p.employeeName)} <span class="badge-tag ${roleTagClass(p.status)}">${esc(roleLabel(p.status))}</span></div>
         <div class="tm"><strong>${num(p.hours).toFixed(2)}h</strong> ${e?'<span class="eod-flag">EOD</span>':''}</div>
         ${eodLine}
       </div>`;
     }).join('');
 
-    // EOD recorded for someone who has since been taken off the roster.
-    const orphanEod = (day.eod || []).filter(e => !day.people.some(p => p.employeeName === e.employeeName))
+    const orphanEod = showFigures ? (day.eod || [])
+      .filter(e => !day.people.some(p => p.employeeName === e.employeeName))
       .map(e => `<div class="shift-card orphan">
-        <div class="nm">${e.employeeName} <span class="badge-tag status-warn">off roster</span></div>
+        <div class="nm">${esc(e.employeeName)} <span class="badge-tag status-warn">off roster</span></div>
         <div class="eod-mini">
           <span>C <strong>${num(e.canvassHours).toFixed(2)}h</strong></span>
           <span>A <strong>${num(e.adminHours).toFixed(2)}h</strong></span>
           <span>#<strong>${num(e.rcpCount)}</strong></span>
           <span><strong>${fmtGBP(e.rcpValue)}</strong></span>
         </div>
-      </div>`).join('');
+      </div>`).join('') : '';
 
     const eodCount = (day.eod || []).length;
-    const eodBtn = (isManager && day.people.length)
+    const eodBtn = (canWrite && day.people.length)
       ? `<button class="eod-btn" data-eod="${dateIso}">📋 EOD${eodCount?` <span class="cnt">${eodCount}/${day.people.length}</span>`:''}</button>`
       : '';
 
@@ -214,50 +325,86 @@ function renderSchedulePage(){
         ${timeLine}
         ${peopleHtml || '<div class="small muted" style="padding:4px 0;">No one added yet</div>'}
         ${orphanEod}
-        ${isManager && day.time ? `<button class="add-shift-btn" data-addperson="${dateIso}">+ Add person</button>` : ''}
+        ${canWrite && day.time ? `<button class="add-shift-btn" data-addperson="${dateIso}">+ Add person</button>` : ''}
         ${eodBtn}
       </div>
     </div>`;
   }
+  return `<div class="day-grid">${dayCols}</div>${renderWeeklyResume(week)}`;
+}
+
+function renderSchedulePage(){
+  normalizeScheduleCity();
+  const tabs = scheduleCityTabs();
+  const sunday = shiftDate(ui.weekMonday,6);
+
+  if(!tabs.length){
+    return `<div class="page-head"><div><h2>Schedule</h2></div></div>
+      <div class="empty-state"><div class="ico">🏙</div>No city is set on your record, so there is no schedule to show.<br>
+      <span class="small">Ask a manager to set your city in the Team tab.</span></div>`;
+  }
+
+  /* One city and no choice to make: don't draw a tab strip that does nothing. */
+  const cityTabs = tabs.length > 1 ? `<div class="city-tabs">${tabs.map(c=>
+    `<div class="city-tab ${ui.scheduleCity===c?'active':''}" data-schedcity="${esc(c)}">${c===ALL_CITIES?'📊 All cities':esc(c)}</div>`
+  ).join('')}</div>` : `<div class="small muted" style="margin-bottom:14px;">📍 ${esc(tabs[0])}</div>`;
+
+  const desc = canEdit()
+    ? 'Set each day\'s shift time once, add the people working that day, then record each person\'s EOD numbers.'
+    : 'View the shifts for the week.';
 
   return `
-    <div class="page-head"><div><h2>Schedule</h2><div class="desc">${isManager?'Set each day\'s shift time once, add the people working that day, then record each person\'s EOD numbers.':'View your assigned shifts and end-of-day numbers for the week.'}</div></div></div>
+    <div class="page-head"><div><h2>Schedule</h2><div class="desc">${desc}</div></div></div>
+    ${cityTabs}
     <div class="week-nav">
       <button class="btn btn-sm" id="prevWeek">‹ Prev</button>
       <span class="lbl">${fmtDate(ui.weekMonday)} – ${fmtDate(sunday)}</span>
       <button class="btn btn-sm" id="nextWeek">Next ›</button>
       <button class="btn btn-sm" id="thisWeek">This week</button>
     </div>
-    <div class="day-grid">${dayCols}</div>
-    ${renderWeeklyResume(week)}
+    ${ui.scheduleCity === ALL_CITIES ? renderCityOverview() : renderCityWeek()}
   `;
 }
 
 async function goToWeek(monday){
   ui.weekMonday = monday;
   pendingRows.clear();
-  await loadWeek(monday);
+  await ensureScheduleData();
+  render();
+}
+async function goToScheduleCity(city){
+  ui.scheduleCity = city;
+  pendingRows.clear();
+  render();                    // show the tab as selected straight away
+  await ensureScheduleData();
   render();
 }
 
 window.tabRefreshers.schedule = async function(){
-  const fresh = await gsRun('getWeekSchedule', ui.weekMonday);
-  if(JSON.stringify(fresh) !== JSON.stringify(scheduleCache[ui.weekMonday])){
-    scheduleCache[ui.weekMonday] = fresh;
-    render();
+  normalizeScheduleCity();
+  if(!ui.scheduleCity) return;
+  if(ui.scheduleCity === ALL_CITIES){
+    const fresh = await gsRun('getWeekSummary', ui.weekMonday);
+    if(JSON.stringify(fresh) !== JSON.stringify(summaryCache[ui.weekMonday])){
+      summaryCache[ui.weekMonday] = fresh; render();
+    }
+    return;
+  }
+  const k = weekKey(ui.weekMonday, ui.scheduleCity);
+  const fresh = await gsRun('getWeekSchedule', ui.weekMonday, ui.scheduleCity);
+  if(JSON.stringify(fresh) !== JSON.stringify(scheduleCache[k])){
+    scheduleCache[k] = fresh; render();
   }
 };
 
-/* Re-fetch the current week from the server, bypassing the cache. */
-async function reloadWeek(){
-  delete scheduleCache[ui.weekMonday];
-  await loadWeek(ui.weekMonday);
-}
-
 function attachScheduleEvents(){
-  document.getElementById('prevWeek').onclick = ()=> goToWeek(shiftDate(ui.weekMonday,-7));
+  const prev = document.getElementById('prevWeek');
+  if(!prev) return; // the "no city" state has no controls
+  prev.onclick = ()=> goToWeek(shiftDate(ui.weekMonday,-7));
   document.getElementById('nextWeek').onclick = ()=> goToWeek(shiftDate(ui.weekMonday,7));
   document.getElementById('thisWeek').onclick = ()=> goToWeek(getMonday(new Date()));
+  document.querySelectorAll('[data-schedcity]').forEach(t=> t.onclick = ()=> goToScheduleCity(t.dataset.schedcity));
+  document.querySelectorAll('[data-gotocity]').forEach(b=> b.onclick = ()=> goToScheduleCity(b.dataset.gotocity));
   document.querySelectorAll('[data-settime]').forEach(b=> b.onclick = ()=> openSetTimeModal(b.dataset.settime));
   document.querySelectorAll('[data-addperson]').forEach(b=> b.onclick = ()=> openAddPersonModal(b.dataset.addperson));
   document.querySelectorAll('[data-eod]').forEach(b=> b.onclick = ()=> openEodModal(b.dataset.eod));
@@ -266,16 +413,15 @@ function attachScheduleEvents(){
       const row = parseInt(b.dataset.row);
       const day = b.dataset.day;
       const name = b.dataset.name;
-      // Mark the card as in-flight straight away so the click is visibly
-      // acknowledged even though the server takes a second or two.
+      const city = ui.scheduleCity;
       pendingRows.add(row);
       const card = b.closest('.shift-card');
       if(card) card.classList.add('is-pending');
       setBusy(b, '');
       safeAction(async ()=>{
         try{
-          await gsRun('removePersonFromDay', row, day, name);
-          await reloadWeek();
+          await gsRun('removePersonFromDay', row, day, city, name);
+          await reloadScheduleData();
           pendingRows.delete(row);
           render();
           toast(name + ' removed from ' + fmtDate(day), 'good');
@@ -290,13 +436,13 @@ function attachScheduleEvents(){
 }
 
 function openSetTimeModal(day){
-  const week = scheduleCache[ui.weekMonday] || {};
+  const week = scheduleCache[weekKey(ui.weekMonday, ui.scheduleCity)] || {};
   const existing = (week[day] && week[day].time) || {start:'10:00', end:'18:00', breakMin:0};
   const count = (week[day] && week[day].people) ? week[day].people.length : 0;
   ui.modal = {
-    title:`Set shift time · ${fmtDate(day)}`,
+    title:`Set shift time · ${esc(ui.scheduleCity)} · ${fmtDate(day)}`,
     body:`
-      <p class="small muted">This time applies to everyone added to this day. Changing it later updates everyone already added${count?` (${count} right now)`:''}.</p>
+      <p class="small muted">Applies to everyone added to this day in ${esc(ui.scheduleCity)}${count?` (${count} right now)`:''}. Other cities are unaffected.</p>
       <div class="grid2">
         <div class="field"><label>Start time (HH:MM)</label><input type="text" inputmode="numeric" id="t_start" value="${existing.start}" placeholder="10:00"></div>
         <div class="field"><label>End time (HH:MM)</label><input type="text" inputmode="numeric" id="t_end" value="${existing.end}" placeholder="18:00"></div>
@@ -310,22 +456,30 @@ function openSetTimeModal(day){
 }
 
 function openAddPersonModal(day){
+  /* Anyone can be added to any city's schedule — covering a shift in another
+     city is normal — but the person's own city is shown so it is a conscious
+     choice rather than a mis-click. */
+  const people = DATA.employees.slice().sort((a,b)=>
+    (a.firstName+a.lastName).localeCompare(b.firstName+b.lastName));
   ui.modal = {
-    title:`Add person · ${fmtDate(day)}`,
+    title:`Add person · ${esc(ui.scheduleCity)} · ${fmtDate(day)}`,
     body:`
       <div class="field"><label>Person</label>
         <select id="p_emp">
           <option value="">— choose —</option>
-          ${DATA.employees.map(e=>`<option value="${e.id}">${e.firstName} ${e.lastName} (${e.status})</option>`).join('')}
-          ${session.role==='manager'?`<option value="__self__">${session.name} (me)</option>`:''}
+          ${people.map(e=>`<option value="${esc(e.id)}">${esc(e.firstName)} ${esc(e.lastName)} — ${esc(roleLabel(e.role))}${e.city?` (${esc(e.city)})`:''}</option>`).join('')}
+          ${isAnonymous()?'':`<option value="__self__">${esc(session.name)} (me)</option>`}
           <option value="__new__">+ New person…</option>
         </select>
       </div>
       <div id="p_newFields" style="display:none;">
-        <div class="field"><label>First name</label><input id="p_fn"></div>
-        <div class="field"><label>Last name</label><input id="p_ln"></div>
+        <div class="grid2">
+          <div class="field"><label>First name</label><input id="p_fn"></div>
+          <div class="field"><label>Last name</label><input id="p_ln"></div>
+        </div>
+        <p class="small muted">They will be created with ${esc(ui.scheduleCity)} as their city and PIN 0000. Set a real PIN in the Team tab.</p>
       </div>
-      <div class="field"><label>Status on shift</label><select id="p_status"><option>Canvasser</option><option>Supervisor</option><option>Manager</option></select></div>
+      <div class="field"><label>Role on shift</label><select id="p_status">${ROLES.map(r=>`<option value="${esc(r)}">${esc(r)}</option>`).join('')}</select></div>
       <div class="modal-actions"><button class="btn" id="p_cancel">Cancel</button><button class="btn btn-accent" id="p_save">Add</button></div>
       <input type="hidden" id="p_day" value="${day}">
     `
@@ -335,23 +489,21 @@ function openAddPersonModal(day){
 
 /* ---------------------------------------------------------
    EOD MODAL
-   Pick one of the people on that day, then record their actual numbers.
-   £RCP/h is shown live as you type and is never entered by hand.
    --------------------------------------------------------- */
 function openEodModal(day){
-  const week = scheduleCache[ui.weekMonday] || {};
+  const week = scheduleCache[weekKey(ui.weekMonday, ui.scheduleCity)] || {};
   const d = week[day] || {people:[], eod:[]};
   const names = d.people.map(p => p.employeeName);
   (d.eod || []).forEach(e => { if(!names.includes(e.employeeName)) names.push(e.employeeName); });
   ui.modal = {
-    title:`End of day · ${fmtDate(day)}`,
+    title:`End of day · ${esc(ui.scheduleCity)} · ${fmtDate(day)}`,
     body:`
       <div class="field"><label>Person</label>
         <select id="e_name">
           <option value="">— choose —</option>
           ${names.map(n=>{
             const done = (d.eod||[]).some(e=>e.employeeName===n);
-            return `<option value="${n}">${n}${done?' ✓':''}</option>`;
+            return `<option value="${esc(n)}">${esc(n)}${done?' ✓':''}</option>`;
           }).join('')}
         </select>
       </div>
@@ -386,7 +538,7 @@ window.moduleModalAttachers.push(function attachScheduleEodModal(){
   const sel = document.getElementById('e_name');
   if(!sel) return;
   const day = document.getElementById('e_day').value;
-  const week = scheduleCache[ui.weekMonday] || {};
+  const week = scheduleCache[weekKey(ui.weekMonday, ui.scheduleCity)] || {};
   const d = week[day] || {people:[], eod:[]};
 
   const form = document.getElementById('e_form');
@@ -422,27 +574,27 @@ window.moduleModalAttachers.push(function attachScheduleEodModal(){
 
   document.getElementById('e_save').onclick = function(){
     const btn = this;
+    const who = sel.value;
     safeButtonAction(btn, 'Saving…', async ()=>{
-      const name = sel.value;
-      if(!name) throw new Error('Choose a person first.');
+      if(!who) throw new Error('Choose a person first.');
       const canvass = readNum('e_canvass');
       const admin = readNum('e_admin');
       const count = readNum('e_count');
       const value = readNum('e_value');
       if(canvass + admin > 24) throw new Error('Canvass + admin hours can\'t be more than 24 in one day.');
       if(count > 0 && canvass === 0) throw new Error('Enter the canvass hours too, otherwise £RCP/h can\'t be calculated.');
-      await gsRun('setEodEntry', day, name, canvass, admin, count, value);
-      await reloadWeek();
+      await gsRun('setEodEntry', day, ui.scheduleCity, who, canvass, admin, count, value);
+      await reloadScheduleData();
       closeModal();
-    }, 'EOD saved for ' + sel.value);
+    }, 'EOD saved for ' + who);
   };
 
   delBtn.onclick = function(){
     const btn = this;
+    const who = sel.value;
     safeButtonAction(btn, 'Deleting…', async ()=>{
-      const name = sel.value;
-      await gsRun('removeEodEntry', day, name);
-      await reloadWeek();
+      await gsRun('removeEodEntry', day, ui.scheduleCity, who);
+      await reloadScheduleData();
       closeModal();
     }, 'EOD deleted');
   };
@@ -450,12 +602,22 @@ window.moduleModalAttachers.push(function attachScheduleEodModal(){
 
 window.moduleModalAttachers.push(function attachSchedulePersonSelectModal(){
   const empSel = document.getElementById('p_emp');
-  if(empSel){
-    empSel.onchange = ()=>{
-      const box = document.getElementById('p_newFields');
-      if(box) box.style.display = empSel.value==='__new__' ? 'block' : 'none';
-    };
-  }
+  if(!empSel) return;
+  empSel.onchange = ()=>{
+    const box = document.getElementById('p_newFields');
+    if(box) box.style.display = empSel.value==='__new__' ? 'block' : 'none';
+    // Default the shift role to the person's own role, so it only has to be
+    // changed when someone covers a different position that day.
+    const roleSel = document.getElementById('p_status');
+    if(!roleSel) return;
+    let role = null;
+    if(empSel.value === '__self__') role = normalizeRole(session.role);
+    else {
+      const emp = DATA.employees.find(e=>e.id===empSel.value);
+      if(emp) role = normalizeRole(emp.role);
+    }
+    if(role) roleSel.value = role;
+  };
 });
 
 window.moduleModalAttachers.push(function attachScheduleModals(){
@@ -470,8 +632,8 @@ window.moduleModalAttachers.push(function attachScheduleModals(){
         const end = normalizeTime(document.getElementById('t_end').value);
         if(!start || !end) throw new Error('Please enter times as HH:MM, e.g. 09:00 or 18:30.');
         const breakMin = parseInt(document.getElementById('t_break').value)||0;
-        await gsRun('setDayTime', day, start, end, breakMin);
-        await reloadWeek();
+        await gsRun('setDayTime', day, ui.scheduleCity, start, end, breakMin);
+        await reloadScheduleData();
         closeModal();
       }, 'Shift time saved');
     };
@@ -492,7 +654,7 @@ window.moduleModalAttachers.push(function attachScheduleModals(){
           const fn = document.getElementById('p_fn').value.trim();
           const ln = document.getElementById('p_ln').value.trim();
           if(!fn) throw new Error('Enter at least a first name.');
-          const newEmp = await gsRun('addEmployee', fn, ln, status, 'Canvasser', '', '0000');
+          const newEmp = await gsRun('addEmployee', fn, ln, ui.scheduleCity, status, '', '0000', '');
           DATA.employees.push(newEmp);
           name = (fn + ' ' + ln).trim();
         } else if(empSel.value){
@@ -501,8 +663,8 @@ window.moduleModalAttachers.push(function attachScheduleModals(){
         } else {
           throw new Error('Choose a person first.');
         }
-        await gsRun('addPersonToDay', day, name, status);
-        await reloadWeek();
+        await gsRun('addPersonToDay', day, ui.scheduleCity, name, status);
+        await reloadScheduleData();
         closeModal();
         toast(name + ' added to ' + fmtDate(day), 'good');
       });
