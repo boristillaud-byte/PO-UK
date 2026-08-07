@@ -206,3 +206,30 @@ button:disabled{cursor:not-allowed;}
   .toast{max-width:none;}
   .resume-table{font-size:12.5px;}
 }
+
+/* =========================================================
+   ROLES
+   One colour per role, ordered light-to-dark as seniority rises so the
+   hierarchy is readable at a glance. tag-unknown is deliberately loud: a
+   role the app doesn't recognise should look wrong, not blend in.
+   ========================================================= */
+.tag-fundraiser{background:#E7EEFB;color:#2256B0;}
+.tag-tl{background:#F1E7FB;color:#6B2BAD;}
+.tag-stl{background:#E7E3FB;color:#4A2BAD;}
+.tag-am{background:#FBF1DE;color:#8A5A12;}
+.tag-manager{background:#FFF1E2;color:var(--accent-deep);}
+.tag-director{background:#15191E;color:#FFD9B8;}
+.tag-unknown{background:var(--bad-bg);color:var(--bad);border:1px dashed var(--bad);}
+
+#sidebar .brand .who{font-size:12px;color:#8c929b;}
+#sidebar .brand .who-role{margin-top:6px;}
+
+.role-matrix{font-size:13px;}
+.role-matrix td,.role-matrix th{white-space:nowrap;}
+
+.btn-danger-solid{background:var(--bad);border-color:var(--bad);color:#fff;font-weight:700;}
+.btn-danger-solid:hover{background:#9B2D22;border-color:#9B2D22;color:#fff;}
+
+.tag-city{background:#E9EDF2;color:#3C4653;}
+.tag-allcities{background:#15191E;color:#8FE3B0;}
+.pin-eye{padding:1px 6px;font-size:11px;margin-left:6px;vertical-align:1px;}
