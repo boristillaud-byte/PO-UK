@@ -134,8 +134,9 @@ function myLevel(){ return session ? roleLevel(session.role) : 0; }
    logistics tabs all ask myCity() rather than offering a picker. */
 function canSeeAllCities(){ return myLevel() >= ROLE_LEVEL['Senior Manager / Director']; }
 function myCity(){ return session ? String(session.city || '').trim() : ''; }
-/* The shared, PIN-less Fundraiser login has no identity attached. */
-function isAnonymous(){ return !!(session && session.anonymous); }
+/* Whether this person may see other people's individual EOD figures.
+   Fundraisers see their own line plus their city's totals, and nothing else. */
+function canSeeOthersFigures(){ return myLevel() >= 2; }
 function canEdit(){ return myLevel() >= EDIT_FROM_LEVEL; }
 function canView(tab){
   const min = TAB_MIN_LEVEL[tab];
@@ -219,7 +220,7 @@ function esc(s){
 let DATA = { campaigns:[], cities:[], charity:[], trainings:[], signatures:[], logistics:{cities:{},log:[]}, badgeLog:[], nextBadgeId:1, employeesForLogin:[], employees:[], retired:[] };
 let scheduleCache = {};
 let session = null; // {role, employeeId, name, city}
-let ui = { tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPins:null };
+let ui = { tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPick:null, revealedPins:null };
 
 /* Rows the user has just asked to change and that are still in flight.
    The schedule renderer greys these out so a slow server round-trip never
@@ -385,19 +386,57 @@ function render(){
 }
 
 /* ---------- LOGIN ----------
-   Two kinds of sign-in:
-   - Fundraisers use one shared entry with no PIN and pick their city. Their
-     names are not listed, so the login screen doesn't publish the whole team.
+   Two kinds of sign-in, both by name:
+   - A Fundraiser picks "Fundraiser", then their city, then their own name from
+     the fundraisers in that city. No PIN. Naming themselves is what keeps
+     document signatures attributable — the alternative, a shared anonymous
+     login, records whatever they type by hand.
    - Everyone from Team Leader up picks their own name and enters their PIN.
-     The role comes from their record, so it can't be chosen wrongly at the door.
+   Either way the role comes from their record, so it can't be chosen wrongly
+   at the door.
 */
 const FUNDRAISER_LOGIN = '__fundraiser__';
 
+/* What the person has picked so far. Kept in ui, not just in the DOM, because
+   showing a validation error re-renders the screen — and losing their
+   selections every time they get something slightly wrong is maddening. */
+function loginPick(){
+  if(!ui.loginPick) ui.loginPick = {who:'', city:'', frName:''};
+  return ui.loginPick;
+}
+
+/** The fundraisers in one city, for the second dropdown. */
+function fundraisersIn(city){
+  if(!city) return [];
+  const c = String(city).trim().toLowerCase();
+  return (DATA.employeesForLogin || [])
+    .filter(e => !e.needsPin && String(e.city || '').trim().toLowerCase() === c)
+    .sort((a, b) => (a.firstName + a.lastName).localeCompare(b.firstName + b.lastName));
+}
+
 function renderLogin(){
-  const list = (DATA.employeesForLogin || [])
+  const pick = loginPick();
+  const all = (DATA.employeesForLogin || [])
     .slice()
     .sort((a, b) => (a.firstName + a.lastName).localeCompare(b.firstName + b.lastName));
+  /* Managers are listed by name at the top level; fundraisers appear only
+     after a city is chosen, so the first dropdown stays short. */
+  const named = all.filter(e => e.needsPin);
   const cities = DATA.cities || [];
+  const isFundraiser = pick.who === FUNDRAISER_LOGIN;
+  const frList = fundraisersIn(pick.city);
+
+  let frOptions;
+  if(!pick.city){
+    frOptions = '<option value="">— choose your city first —</option>';
+  } else if(!frList.length){
+    frOptions = `<option value="">No fundraisers listed in ${esc(pick.city)} yet</option>`;
+  } else {
+    frOptions = '<option value="">— choose your name —</option>' + frList.map(e =>
+      `<option value="${esc(e.id)}" ${pick.frName===e.id?'selected':''}>${esc(e.firstName + ' ' + e.lastName)}</option>`
+    ).join('');
+  }
+
   return `<div id="login-screen"><div class="login-box">
     <span class="tag">Field Ops</span><h1>Outreach Hub</h1>
     <p class="sub">Sign in to view your schedule, documents and team tools.</p>
@@ -405,79 +444,113 @@ function renderLogin(){
     <div class="field"><label>Who are you?</label>
       <select id="loginEmp">
         <option value="">— choose —</option>
-        <option value="${FUNDRAISER_LOGIN}">Fundraiser</option>
-        ${list.length ? `<optgroup label="Team leaders and managers">
-          ${list.map(e => `<option value="${esc(e.id)}">${esc(e.firstName + ' ' + e.lastName)}</option>`).join('')}
+        <option value="${FUNDRAISER_LOGIN}" ${isFundraiser?'selected':''}>Fundraiser</option>
+        ${named.length ? `<optgroup label="Team leaders and managers">
+          ${named.map(e => `<option value="${esc(e.id)}" ${pick.who===e.id?'selected':''}>${esc(e.firstName + ' ' + e.lastName)}</option>`).join('')}
         </optgroup>` : ''}
       </select>
     </div>
-    <div class="field" id="loginCityWrap" style="display:none;"><label>Your city</label>
+    <div class="field" id="loginCityWrap" style="display:${isFundraiser?'block':'none'};"><label>Your city</label>
       <select id="loginCity">
         <option value="">— choose —</option>
-        ${cities.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+        ${cities.map(c => `<option value="${esc(c)}" ${pick.city===c?'selected':''}>${esc(c)}</option>`).join('')}
       </select>
     </div>
-    <div class="field" id="loginPinWrap" style="display:none;"><label>PIN</label>
+    <div class="field" id="loginFrNameWrap" style="display:${isFundraiser?'block':'none'};"><label>Your name</label>
+      <select id="loginFrName">${frOptions}</select>
+    </div>
+    <div class="field" id="loginPinWrap" style="display:${(pick.who && !isFundraiser)?'block':'none'};"><label>PIN</label>
       <input type="password" inputmode="numeric" maxlength="6" id="loginPin" placeholder="••••">
     </div>
     <button class="btn-primary" id="loginGo">Sign in</button>
-    <div class="login-note">Fundraisers just pick their city — no PIN needed. Everyone else needs their PIN; ask a manager if you've forgotten it.</div>
+    <div class="login-note">Fundraisers pick their city and their name — no PIN needed. Everyone else needs their PIN; ask a manager if you've forgotten it.</div>
   </div></div>`;
 }
 
 function attachLoginEvents(){
   const sel = document.getElementById('loginEmp');
   const go = document.getElementById('loginGo');
-  const cityWrap = document.getElementById('loginCityWrap');
-  const pinWrap = document.getElementById('loginPinWrap');
   if(!sel || !go) return;
+  const cityWrap = document.getElementById('loginCityWrap');
+  const frNameWrap = document.getElementById('loginFrNameWrap');
+  const pinWrap = document.getElementById('loginPinWrap');
+  const citySel = document.getElementById('loginCity');
+  const frNameSel = document.getElementById('loginFrName');
+  const pick = loginPick();
 
-  /* Toggled in place rather than by re-rendering, so a half-typed PIN or a
-     chosen city isn't thrown away when the selection changes. */
+  /* Shown and hidden in place rather than by re-rendering, so a half-typed
+     PIN isn't thrown away mid-selection. */
   sel.onchange = ()=>{
+    pick.who = sel.value;
     const isFundraiser = sel.value === FUNDRAISER_LOGIN;
     cityWrap.style.display = isFundraiser ? 'block' : 'none';
-    pinWrap.style.display  = (sel.value && !isFundraiser) ? 'block' : 'none';
+    frNameWrap.style.display = isFundraiser ? 'block' : 'none';
+    pinWrap.style.display = (sel.value && !isFundraiser) ? 'block' : 'none';
   };
-  const pin = document.getElementById('loginPin');
-  if(pin) pin.onkeydown = (e)=>{ if(e.key === 'Enter') go.click(); };
+
+  /* The name list follows the city, so nobody can pick a colleague from
+     another city by accident. */
+  citySel.onchange = ()=>{
+    pick.city = citySel.value;
+    pick.frName = '';
+    const mine = fundraisersIn(pick.city);
+    if(!pick.city){
+      frNameSel.innerHTML = '<option value="">— choose your city first —</option>';
+    } else if(!mine.length){
+      frNameSel.innerHTML = `<option value="">No fundraisers listed in ${esc(pick.city)} yet</option>`;
+    } else {
+      frNameSel.innerHTML = '<option value="">— choose your name —</option>' +
+        mine.map(e => `<option value="${esc(e.id)}">${esc(e.firstName + ' ' + e.lastName)}</option>`).join('');
+    }
+  };
+  frNameSel.onchange = ()=>{ pick.frName = frNameSel.value; };
+
+  const pinEl = document.getElementById('loginPin');
+  if(pinEl) pinEl.onkeydown = (e)=>{ if(e.key === 'Enter') go.click(); };
+
+  function refuse(msg){ ui.loginError = msg; render(); }
 
   go.onclick = ()=> safeButtonAction(go, 'Signing in…', async ()=>{
     const choice = sel.value;
-    if(!choice){ ui.loginError = 'Choose who you are.'; render(); return; }
+    if(!choice) return refuse('Choose who you are.');
 
-    /* Fundraiser: no PIN, no identity. Nothing to verify, so no round-trip. */
+    /* Fundraiser: no PIN, but they name themselves. The server checks that the
+       name really is a fundraiser in that city, so this path can't be used to
+       sign in as a manager. */
     if(choice === FUNDRAISER_LOGIN){
-      const city = document.getElementById('loginCity').value;
-      if(!city){ ui.loginError = 'Choose your city.'; render(); return; }
-      session = { employeeId:null, name:'', role:'Fundraiser', city:city, anonymous:true };
+      if(!citySel.value) return refuse('Choose your city.');
+      if(!frNameSel.value) return refuse('Choose your name from the list. If it isn\'t there, ask a manager to add you to the team.');
+      const fr = await gsRun('loginFundraiser', frNameSel.value, citySel.value);
+      if(!fr.ok) return refuse(fr.error);
+      session = {
+        employeeId: fr.employee.id,
+        name: fr.employee.firstName + ' ' + fr.employee.lastName,
+        role: 'Fundraiser',
+        city: fr.employee.city || citySel.value
+      };
       await startSession();
       return;
     }
 
-    const pinVal = document.getElementById('loginPin').value;
-    if(!pinVal){ ui.loginError = 'Enter your PIN.'; render(); return; }
-    const res = await gsRun('login', choice, pinVal);
-    if(!res.ok){ ui.loginError = res.error; render(); return; }
+    if(!pinEl.value) return refuse('Enter your PIN.');
+    const res = await gsRun('login', choice, pinEl.value);
+    if(!res.ok) return refuse(res.error);
 
     const role = normalizeRole(res.employee.role);
     if(!role){
       // Better to say exactly what is wrong than to sign someone in with no
       // access and let them think the app is broken.
-      ui.loginError = 'Your role is set to "' + esc(res.employee.role || '(empty)') +
-        '", which is not one of the six roles. Ask a manager to set it in the Team tab.';
-      render(); return;
+      return refuse('Your role is set to "' + esc(res.employee.role || '(empty)') +
+        '", which is not one of the six roles. Ask a manager to set it in the Team tab.');
     }
     if(!canSeeAllCitiesFor(role) && !String(res.employee.city || '').trim()){
-      ui.loginError = 'No city is set on your record, so there is nothing to show you. Ask a manager to set it in the Team tab.';
-      render(); return;
+      return refuse('No city is set on your record, so there is nothing to show you. Ask a manager to set it in the Team tab.');
     }
     session = {
       employeeId: res.employee.id,
       name: res.employee.firstName + ' ' + res.employee.lastName,
       role: role,
-      city: res.employee.city || '',
-      anonymous: false
+      city: res.employee.city || ''
     };
     await startSession();
   });
@@ -491,6 +564,7 @@ function canSeeAllCitiesFor(role){ return roleLevel(role) >= ROLE_LEVEL['Senior 
 async function startSession(){
   ui.tab = firstVisibleTab();
   ui.loginError = null;
+  ui.loginPick = null;
   ui.scheduleCity = canSeeAllCities() ? ALL_CITIES : myCity();
   ui.city = canSeeAllCities() ? (ui.city || (DATA.cities || [])[0]) : myCity();
   try{ await ensureScheduleData(); }catch(e){ /* the tab shows its own error */ }
@@ -518,7 +592,7 @@ function renderShell(){
     <div id="sidebar">
       <div class="brand">
         <span class="tag">Field Ops</span><h1>Outreach Hub</h1>
-        <div class="who">${isAnonymous() ? 'Shared fundraiser access' : esc(session.name)}</div>
+        <div class="who">${esc(session.name)}</div>
         <div class="who-role">
           <span class="badge-tag ${roleTagClass(session.role)}">${esc(session.role)}</span>
           ${canSeeAllCities() ? '<span class="badge-tag tag-allcities">All cities</span>' : (myCity() ? `<span class="badge-tag tag-city">${esc(myCity())}</span>` : '')}
@@ -541,7 +615,7 @@ function attachShellEvents(){
   document.getElementById('logout').onclick = ()=>{
     session=null; pendingRows.clear(); scheduleCache={}; summaryCache={};
     stopPolling();
-    ui={tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPins:null};
+    ui={tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPick:null, revealedPins:null};
     render();
   };
   document.getElementById('refreshNow').onclick = manualRefresh;
