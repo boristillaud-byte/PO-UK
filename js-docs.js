@@ -20,7 +20,23 @@ function docStatusFor(doc, employeeName){
 }
 
 function renderDocsPage(){
-  if(session.role==='canvasser'){
+  if(isAnonymous()){
+    /* No identity, so there is no per-person status to show. The signing form
+       asks for a name, which is then recorded as usual. */
+    const cards = DATA.trainings.map(doc=>`<div class="doc-card">
+        <div>
+          <div class="ttl">${esc(doc.Title)} <span class="badge-tag" style="background:#eee;color:#555;">${esc(doc.Category)}</span></div>
+          <div class="meta">${String(doc.RequiresRenewal).toUpperCase()==='TRUE'?`Re-sign every ${doc.RenewalMonths} months`:'One-time acknowledgement'}</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:10px;">
+          ${doc.URL?`<a class="btn btn-sm" href="${esc(doc.URL)}" target="_blank" rel="noopener">View ↗</a>`:''}
+          <button class="btn btn-sm btn-accent" data-sign="${esc(doc.ID)}">Sign</button>
+        </div>
+      </div>`).join('');
+    return `<div class="page-head"><div><h2>Documentation</h2><div class="desc">Review and sign your trainings and policies. Enter your own name when you sign.</div></div></div>
+      <div class="panel">${cards}</div>`;
+  }
+  if(!canEdit()){
     const cards = DATA.trainings.map(doc=>{
       const st = docStatusFor(doc, session.name);
       return `<div class="doc-card">
@@ -101,7 +117,20 @@ function attachDocsEvents(){
     render();
   };
   document.querySelectorAll('[data-rmdoc]').forEach(b=>{
-    b.onclick = ()=> safeAction(async ()=>{ await gsRun('removeTrainingDoc', b.dataset.rmdoc); DATA.trainings = await gsRun('getTrainingDocs'); render(); });
+    b.onclick = ()=>{
+      const doc = DATA.trainings.find(d=>String(d.ID)===b.dataset.rmdoc);
+      confirmAction({
+        title:'Remove this document?',
+        message:`Remove <strong>${esc(doc?doc.Title:'this document')}</strong>?`,
+        note:'Signatures already recorded against it are kept, but it will no longer appear in the compliance overview.',
+        confirmLabel:'Yes, remove', danger:true,
+        onConfirm: async ()=>{
+          await gsRun('removeTrainingDoc', b.dataset.rmdoc);
+          DATA.trainings = await gsRun('getTrainingDocs');
+          toast('Document removed','good');
+        }
+      });
+    };
   });
 }
 window.moduleModalAttachers.push(function attachDocsModals(){
