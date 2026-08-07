@@ -146,3 +146,63 @@ tr:last-child td{border-bottom:none;}
   .nav-item.active{border-bottom-color:var(--accent);}
   .grid2{grid-template-columns:1fr;}
 }
+
+/* =========================================================
+   FEEDBACK: TOASTS, SPINNERS, PENDING ROWS
+   ========================================================= */
+#toastHost{position:fixed;bottom:20px;right:20px;z-index:200;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none;}
+.toast{display:flex;align-items:center;gap:9px;background:var(--ink);color:#fff;padding:11px 15px;border-radius:8px;font-size:13.5px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.28);max-width:340px;animation:toastIn .22s ease-out;}
+.toast .ic{display:inline-flex;align-items:center;justify-content:center;width:19px;height:19px;border-radius:50%;font-size:12px;font-weight:800;flex-shrink:0;background:#fff;color:var(--ink);}
+.toast-good .ic{background:#4ADE80;color:#0b3d20;}
+.toast-bad{background:#7F1D1D;}
+.toast-bad .ic{background:#FCA5A5;color:#7F1D1D;}
+.toast-info .ic{background:#93C5FD;color:#12335e;}
+.toast.out{animation:toastOut .3s ease-in forwards;}
+@keyframes toastIn{from{opacity:0;transform:translateY(10px) scale(.97);}to{opacity:1;transform:none;}}
+@keyframes toastOut{to{opacity:0;transform:translateY(6px) scale(.98);}}
+
+.spinner{display:inline-block;width:12px;height:12px;border:2px solid currentColor;border-top-color:transparent;border-radius:50%;vertical-align:-1px;animation:spin .6s linear infinite;}
+@keyframes spin{to{transform:rotate(360deg);}}
+button.is-busy{opacity:.75;cursor:progress;}
+button:disabled{cursor:not-allowed;}
+
+.shift-card.is-pending{opacity:.45;filter:grayscale(.5);pointer-events:none;}
+.shift-card.is-pending .rm{color:var(--muted);}
+.shift-card.orphan{border-left-color:var(--warn);background:#FEFBF3;}
+
+/* =========================================================
+   EOD
+   ========================================================= */
+.eod-btn{width:100%;border:1.5px solid var(--ink);background:var(--ink);color:#fff;border-radius:6px;padding:6px;font-size:12px;font-weight:700;margin-top:6px;letter-spacing:.3px;}
+.eod-btn:hover{background:var(--accent);border-color:var(--accent);color:#1a1207;}
+.eod-btn .cnt{font-weight:600;opacity:.8;font-size:11px;}
+.eod-flag{display:inline-block;background:var(--good-bg);color:var(--good);font-size:9.5px;font-weight:800;letter-spacing:.4px;padding:1px 5px;border-radius:3px;vertical-align:1px;}
+.eod-mini{display:flex;flex-wrap:wrap;gap:4px 8px;margin-top:5px;padding-top:5px;border-top:1px dashed var(--line);font-size:11px;color:var(--muted);}
+.eod-mini strong{color:var(--ink);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;}
+.eod-mini .rate{color:var(--accent-deep);font-weight:700;}
+
+.calc-box{display:flex;flex-direction:column;gap:2px;background:#FFF7F0;border:1px solid #F5D9BE;border-radius:8px;padding:11px 13px;margin-bottom:4px;}
+.calc-box .k{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--accent-deep);}
+.calc-box .v{font-size:21px;font-weight:800;}
+
+/* =========================================================
+   WEEKLY RESUME
+   ========================================================= */
+.panel-sub{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.6px;color:var(--muted);margin:20px 0 8px;}
+.stat-row{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;}
+.stat{border:1px solid var(--line);border-radius:8px;padding:13px 15px;background:#FAFBFC;}
+.stat .k{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);}
+.stat .v{font-size:24px;font-weight:800;line-height:1.25;margin-top:2px;}
+.stat .sub{font-size:11px;color:var(--muted);margin-top:2px;}
+.stat-hi{background:#FFF7F0;border-color:#F5D9BE;}
+.stat-hi .k{color:var(--accent-deep);}
+.resume-table th:not(:first-child),.resume-table td:not(:first-child){text-align:right;}
+.resume-table tfoot td{border-top:2px solid var(--line);border-bottom:none;font-weight:800;background:#FAFBFC;}
+.resume-table tbody tr:hover{background:#FAFBFC;}
+.modal-box.wide{width:520px;}
+
+@media (max-width:900px){
+  #toastHost{left:12px;right:12px;bottom:12px;align-items:stretch;}
+  .toast{max-width:none;}
+  .resume-table{font-size:12.5px;}
+}
