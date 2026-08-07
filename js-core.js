@@ -6,6 +6,7 @@
    normal static page like any other, not a page embedded in Google's
    sandboxed iframe.
    ========================================================= */
+
 /* Resolves the backend URL from whichever place it was set.
    index.html sets window.API_URL inline. Older deployments used a separate
    config.js with `const API_URL = …`; that still works and takes priority,
@@ -33,6 +34,118 @@ function gsRun(fnName, ...args){
   const result = gsQueue.then(run, run);
   gsQueue = result.catch(() => {});
   return result;
+}
+
+/* =========================================================
+   ROLES AND PERMISSIONS
+
+   One role per person, stored in the Employees sheet's `Role` column. It is
+   both the badge shown on the schedule and the source of what someone may
+   do — so a Fundraiser can never accidentally end up with Manager rights.
+
+   Levels are ordered. A tab has a minimum level to SEE it, and everything
+   from EDIT_FROM_LEVEL up may also CHANGE things. Adding a role later means
+   adding one line to ROLE_LEVEL, nothing else.
+
+   IMPORTANT — this is interface-level access control, not security. The
+   Apps Script web app is deployed as "Anyone", so anyone who knows the URL
+   could call it directly. Hiding a button hides it from honest mistakes,
+   not from someone determined. Fine for an internal team tool; do not put
+   anything here you would not accept a fundraiser being able to read.
+   ========================================================= */
+const ROLES = [
+  'Fundraiser',
+  'Team Leader',
+  'Senior Team Leader',
+  'Assistant Manager',
+  'Manager',
+  'Senior Manager / Director'
+];
+const ROLE_LEVEL = {
+  'Fundraiser': 1,
+  'Team Leader': 2,
+  'Senior Team Leader': 3,
+  'Assistant Manager': 4,
+  'Manager': 5,
+  'Senior Manager / Director': 6
+};
+const EDIT_FROM_LEVEL = 4; // Assistant Manager and above may change things
+
+/* Values that predate the six roles. Read-time only — nothing in the sheet
+   is rewritten, so existing rows keep working while they get tidied up by
+   hand. The rights each one maps to are the rights it already had. */
+const LEGACY_ROLES = {
+  'Canvasser': 'Fundraiser',
+  'Supervisor': 'Team Leader'
+};
+
+/* Minimum level required to see each tab. */
+const TAB_MIN_LEVEL = {
+  schedule:  1,
+  charity:   1,
+  docs:      1,
+  logistics: 2,
+  team:      2,
+  badges:    4,
+  retired:   4
+};
+
+const ROLE_TAG = {
+  'Fundraiser': 'tag-fundraiser',
+  'Team Leader': 'tag-tl',
+  'Senior Team Leader': 'tag-stl',
+  'Assistant Manager': 'tag-am',
+  'Manager': 'tag-manager',
+  'Senior Manager / Director': 'tag-director'
+};
+
+/* Returns the canonical role name, or null if the value is not recognised.
+   Tolerates casing and stray spaces, and maps the legacy names. */
+function normalizeRole(raw){
+  const s = String(raw == null ? '' : raw).trim().replace(/\s+/g, ' ');
+  if(!s) return null;
+  if(ROLE_LEVEL[s]) return s;
+  if(LEGACY_ROLES[s]) return LEGACY_ROLES[s];
+  const lower = s.toLowerCase();
+  const hit = ROLES.find(r => r.toLowerCase() === lower);
+  if(hit) return hit;
+  const legacyKey = Object.keys(LEGACY_ROLES).find(k => k.toLowerCase() === lower);
+  if(legacyKey) return LEGACY_ROLES[legacyKey];
+  // "Senior Manager", "Director" typed on their own
+  if(lower === 'director' || lower === 'senior manager') return 'Senior Manager / Director';
+  return null;
+}
+function roleLevel(role){ const r = normalizeRole(role); return r ? ROLE_LEVEL[r] : 0; }
+function roleTagClass(role){ const r = normalizeRole(role); return r ? ROLE_TAG[r] : 'tag-unknown'; }
+/* What to print for a role, keeping the original text visible when it is
+   not one of the six — so a bad value is obvious instead of silent. */
+function roleLabel(raw){
+  const r = normalizeRole(raw);
+  if(r) return r;
+  const s = String(raw == null ? '' : raw).trim();
+  return s ? s + ' ?' : 'No role set';
+}
+
+function myLevel(){ return session ? roleLevel(session.role) : 0; }
+
+/* CITY SCOPING
+   Only Senior Manager / Director sees every city. Everyone else is confined
+   to the city on their record, which is why the schedule, team, badges and
+   logistics tabs all ask myCity() rather than offering a picker. */
+function canSeeAllCities(){ return myLevel() >= ROLE_LEVEL['Senior Manager / Director']; }
+function myCity(){ return session ? String(session.city || '').trim() : ''; }
+/* The shared, PIN-less Fundraiser login has no identity attached. */
+function isAnonymous(){ return !!(session && session.anonymous); }
+function canEdit(){ return myLevel() >= EDIT_FROM_LEVEL; }
+function canView(tab){
+  const min = TAB_MIN_LEVEL[tab];
+  return min ? myLevel() >= min : false;
+}
+/* First tab this person is allowed to see — used after login and as a
+   fallback if they somehow land on a tab they may not open. */
+function firstVisibleTab(){
+  const order = ['schedule','charity','docs','logistics','team','badges','retired'];
+  return order.find(canView) || 'schedule';
 }
 
 /* =========================================================
@@ -92,14 +205,21 @@ function fmtGBP(n){
   return '£' + v.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
 }
 function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
+/* Escapes text before it goes into a template string, so a name with an
+   apostrophe or angle bracket can't break the markup. */
+function esc(s){
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
 
 /* =========================================================
    GLOBAL STATE
    ========================================================= */
-let DATA = { campaigns:[], cities:[], charity:[], trainings:[], signatures:[], logistics:{cities:{},log:[]}, badgeLog:[], nextBadgeId:1, employeesForLogin:[], employees:[] };
+let DATA = { campaigns:[], cities:[], charity:[], trainings:[], signatures:[], logistics:{cities:{},log:[]}, badgeLog:[], nextBadgeId:1, employeesForLogin:[], employees:[], retired:[] };
 let scheduleCache = {};
-let session = null; // {role, employeeId, name, status}
-let ui = { tab:'schedule', weekMonday:getMonday(new Date()), city:null, modal:null, loginStep:'pick', pickedRole:null, loginError:null };
+let session = null; // {role, employeeId, name, city}
+let ui = { tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPins:null };
 
 /* Rows the user has just asked to change and that are still in flight.
    The schedule renderer greys these out so a slow server round-trip never
@@ -166,11 +286,55 @@ function safeButtonAction(btn, busyLabel, fn, successMsg){
     .then(() => { if(!restored){ try{ restore(); }catch(e){} } });
 }
 
+/* Wrap any button click that calls the server: on failure, show the real
+   error instead of leaving the UI stuck with no feedback. */
+async function safeAction(fn){
+  try{ await fn(); }
+  catch(err){
+    const msg = (err && err.message) ? err.message : String(err);
+    toast(msg, 'bad');
+  }
+}
+
+/* =========================================================
+   CONFIRMATION DIALOG
+   Anything that removes or hides a record asks first. One helper so every
+   confirmation looks and behaves the same.
+   ========================================================= */
+let pendingConfirm = null;
+function confirmAction(opts){
+  pendingConfirm = opts.onConfirm;
+  ui.modal = {
+    title: opts.title || 'Are you sure?',
+    body: `
+      <p style="margin:0;font-size:14px;line-height:1.6;">${opts.message}</p>
+      ${opts.note ? `<p class="small muted" style="margin-top:10px;">${opts.note}</p>` : ''}
+      <div class="modal-actions">
+        <button class="btn" id="cf_no">No, cancel</button>
+        <button class="btn ${opts.danger ? 'btn-danger-solid' : 'btn-accent'}" id="cf_yes">${opts.confirmLabel || 'Yes, continue'}</button>
+      </div>`
+  };
+  render();
+}
+window.moduleModalAttachers.push(function attachConfirmModal(){
+  const yes = document.getElementById('cf_yes');
+  if(!yes) return;
+  document.getElementById('cf_no').onclick = ()=>{ pendingConfirm = null; closeModal(); };
+  yes.onclick = function(){
+    const fn = pendingConfirm;
+    safeButtonAction(this, 'Working…', async ()=>{
+      if(fn) await fn();
+      pendingConfirm = null;
+      closeModal();
+    });
+  };
+});
+
 /* =========================================================
    LIVE REFRESH (polling)
    Apps Script web apps have no push/websocket channel, so "live" here means:
    every POLL_INTERVAL_MS, silently re-fetch whatever the current tab needs
-   and only re-render if something actually changed. Each js-<tab>.html file
+   and only re-render if something actually changed. Each js-<tab>.js file
    registers its own refresher below — this file doesn't need to know what
    each tab fetches.
    ========================================================= */
@@ -210,16 +374,6 @@ async function manualRefresh(){
   });
 }
 
-/* Wrap any button click that calls the server: on failure, show the real
-   error instead of leaving the UI stuck with no feedback. */
-async function safeAction(fn){
-  try{ await fn(); }
-  catch(err){
-    const msg = (err && err.message) ? err.message : String(err);
-    toast(msg, 'bad');
-  }
-}
-
 /* =========================================================
    RENDER ROOT
    ========================================================= */
@@ -230,77 +384,149 @@ function render(){
   attachShellEvents();
 }
 
-/* ---------- LOGIN ---------- */
+/* ---------- LOGIN ----------
+   Two kinds of sign-in:
+   - Fundraisers use one shared entry with no PIN and pick their city. Their
+     names are not listed, so the login screen doesn't publish the whole team.
+   - Everyone from Team Leader up picks their own name and enters their PIN.
+     The role comes from their record, so it can't be chosen wrongly at the door.
+*/
+const FUNDRAISER_LOGIN = '__fundraiser__';
+
 function renderLogin(){
-  let body = '';
-  if(ui.loginError) body += `<div class="login-error">${ui.loginError}</div>`;
-  body += `
-    <div class="role-row">
-      <div class="role-btn ${ui.pickedRole==='manager'?'active':''}" data-role="manager"><span class="ico">🧭</span>Manager</div>
-      <div class="role-btn ${ui.pickedRole==='canvasser'?'active':''}" data-role="canvasser"><span class="ico">🎯</span>Canvasser</div>
-    </div>`;
-  if(ui.pickedRole){
-    const list = DATA.employeesForLogin.filter(e => e.loginRole === (ui.pickedRole==='manager'?'Manager':'Canvasser'));
-    body += `
-      <div class="field"><label>Your name</label>
-        <select id="loginEmp">
-          <option value="">— choose —</option>
-          ${list.map(e=>`<option value="${e.id}">${e.firstName} ${e.lastName}</option>`).join('')}
-        </select>
-      </div>
-      <div class="field"><label>PIN</label><input type="password" inputmode="numeric" maxlength="6" id="loginPin" placeholder="••••"></div>
-      <button class="btn-primary" id="loginGo">Sign in</button>
-      <div class="login-note">Not on the list, or forgot your PIN? Ask your manager — team members are managed in the Team tab.</div>
-    `;
-  }
+  const list = (DATA.employeesForLogin || [])
+    .slice()
+    .sort((a, b) => (a.firstName + a.lastName).localeCompare(b.firstName + b.lastName));
+  const cities = DATA.cities || [];
   return `<div id="login-screen"><div class="login-box">
     <span class="tag">Field Ops</span><h1>Outreach Hub</h1>
     <p class="sub">Sign in to view your schedule, documents and team tools.</p>
-    ${body}
+    ${ui.loginError ? `<div class="login-error">${ui.loginError}</div>` : ''}
+    <div class="field"><label>Who are you?</label>
+      <select id="loginEmp">
+        <option value="">— choose —</option>
+        <option value="${FUNDRAISER_LOGIN}">Fundraiser</option>
+        ${list.length ? `<optgroup label="Team leaders and managers">
+          ${list.map(e => `<option value="${esc(e.id)}">${esc(e.firstName + ' ' + e.lastName)}</option>`).join('')}
+        </optgroup>` : ''}
+      </select>
+    </div>
+    <div class="field" id="loginCityWrap" style="display:none;"><label>Your city</label>
+      <select id="loginCity">
+        <option value="">— choose —</option>
+        ${cities.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join('')}
+      </select>
+    </div>
+    <div class="field" id="loginPinWrap" style="display:none;"><label>PIN</label>
+      <input type="password" inputmode="numeric" maxlength="6" id="loginPin" placeholder="••••">
+    </div>
+    <button class="btn-primary" id="loginGo">Sign in</button>
+    <div class="login-note">Fundraisers just pick their city — no PIN needed. Everyone else needs their PIN; ask a manager if you've forgotten it.</div>
   </div></div>`;
 }
+
 function attachLoginEvents(){
-  document.querySelectorAll('.role-btn').forEach(b=>{
-    b.onclick = ()=>{ ui.pickedRole=b.dataset.role; ui.loginError=null; render(); };
-  });
+  const sel = document.getElementById('loginEmp');
   const go = document.getElementById('loginGo');
-  if(go) go.onclick = ()=> safeButtonAction(go, 'Signing in…', async ()=>{
-    const empId = document.getElementById('loginEmp').value;
-    const pin = document.getElementById('loginPin').value;
-    if(!empId || !pin) return;
-    const res = await gsRun('login', empId, pin);
+  const cityWrap = document.getElementById('loginCityWrap');
+  const pinWrap = document.getElementById('loginPinWrap');
+  if(!sel || !go) return;
+
+  /* Toggled in place rather than by re-rendering, so a half-typed PIN or a
+     chosen city isn't thrown away when the selection changes. */
+  sel.onchange = ()=>{
+    const isFundraiser = sel.value === FUNDRAISER_LOGIN;
+    cityWrap.style.display = isFundraiser ? 'block' : 'none';
+    pinWrap.style.display  = (sel.value && !isFundraiser) ? 'block' : 'none';
+  };
+  const pin = document.getElementById('loginPin');
+  if(pin) pin.onkeydown = (e)=>{ if(e.key === 'Enter') go.click(); };
+
+  go.onclick = ()=> safeButtonAction(go, 'Signing in…', async ()=>{
+    const choice = sel.value;
+    if(!choice){ ui.loginError = 'Choose who you are.'; render(); return; }
+
+    /* Fundraiser: no PIN, no identity. Nothing to verify, so no round-trip. */
+    if(choice === FUNDRAISER_LOGIN){
+      const city = document.getElementById('loginCity').value;
+      if(!city){ ui.loginError = 'Choose your city.'; render(); return; }
+      session = { employeeId:null, name:'', role:'Fundraiser', city:city, anonymous:true };
+      await startSession();
+      return;
+    }
+
+    const pinVal = document.getElementById('loginPin').value;
+    if(!pinVal){ ui.loginError = 'Enter your PIN.'; render(); return; }
+    const res = await gsRun('login', choice, pinVal);
     if(!res.ok){ ui.loginError = res.error; render(); return; }
-    session = { role: ui.pickedRole, employeeId: res.employee.id, name: res.employee.firstName+' '+res.employee.lastName, status: res.employee.status };
-    ui.tab='schedule'; ui.loginError=null;
-    render();
+
+    const role = normalizeRole(res.employee.role);
+    if(!role){
+      // Better to say exactly what is wrong than to sign someone in with no
+      // access and let them think the app is broken.
+      ui.loginError = 'Your role is set to "' + esc(res.employee.role || '(empty)') +
+        '", which is not one of the six roles. Ask a manager to set it in the Team tab.';
+      render(); return;
+    }
+    if(!canSeeAllCitiesFor(role) && !String(res.employee.city || '').trim()){
+      ui.loginError = 'No city is set on your record, so there is nothing to show you. Ask a manager to set it in the Team tab.';
+      render(); return;
+    }
+    session = {
+      employeeId: res.employee.id,
+      name: res.employee.firstName + ' ' + res.employee.lastName,
+      role: role,
+      city: res.employee.city || '',
+      anonymous: false
+    };
+    await startSession();
   });
+}
+
+/* Same test as canSeeAllCities but for a role we haven't stored yet. */
+function canSeeAllCitiesFor(role){ return roleLevel(role) >= ROLE_LEVEL['Senior Manager / Director']; }
+
+/** Sets up the first view and loads what it needs before painting, so nobody
+ *  sees an empty schedule for a second after signing in. */
+async function startSession(){
+  ui.tab = firstVisibleTab();
+  ui.loginError = null;
+  ui.scheduleCity = canSeeAllCities() ? ALL_CITIES : myCity();
+  ui.city = canSeeAllCities() ? (ui.city || (DATA.cities || [])[0]) : myCity();
+  try{ await ensureScheduleData(); }catch(e){ /* the tab shows its own error */ }
+  render();
+  startPolling();
 }
 
 /* ---------- SHELL / NAV ---------- */
 function navItems(){
-  const items = [
-    {id:'schedule', ico:'🗓️', label:'Schedule'},
-    {id:'charity', ico:'🤝', label:'Charity Campaigns'},
-    {id:'docs', ico:'📄', label:'Documentation'}
-  ];
-  if(session.role==='manager'){
-    items.push({id:'logistics', ico:'🎒', label:'Logistics'});
-    items.push({id:'badges', ico:'🪪', label:'Badges'});
-    items.push({id:'team', ico:'👥', label:'Team'});
-  }
-  return items;
+  return [
+    {id:'schedule',  ico:'🗓️', label:'Schedule'},
+    {id:'charity',   ico:'🤝', label:'Charity Campaigns'},
+    {id:'docs',      ico:'📄', label:'Documentation'},
+    {id:'logistics', ico:'🎒', label:'Logistics'},
+    {id:'badges',    ico:'🪪', label:'Badges'},
+    {id:'team',      ico:'👥', label:'Team'},
+    {id:'retired',   ico:'📕', label:'Retired Employees'}
+  ].filter(it => canView(it.id));
 }
 function renderShell(){
   const items = navItems();
+  if(!canView(ui.tab)) ui.tab = firstVisibleTab();
   return `
   <div id="app-shell">
     <div id="sidebar">
       <div class="brand">
         <span class="tag">Field Ops</span><h1>Outreach Hub</h1>
-        <div class="who">${session.role==='manager'?'Manager':'Canvasser'} · ${session.name}</div>
+        <div class="who">${isAnonymous() ? 'Shared fundraiser access' : esc(session.name)}</div>
+        <div class="who-role">
+          <span class="badge-tag ${roleTagClass(session.role)}">${esc(session.role)}</span>
+          ${canSeeAllCities() ? '<span class="badge-tag tag-allcities">All cities</span>' : (myCity() ? `<span class="badge-tag tag-city">${esc(myCity())}</span>` : '')}
+        </div>
       </div>
       ${items.map(it=>`<div class="nav-item ${ui.tab===it.id?'active':''}" data-tab="${it.id}"><span class="ico">${it.ico}</span>${it.label}</div>`).join('')}
       <div class="spacer"></div>
+      ${canEdit() ? '' : '<div class="small" style="padding:0 20px 8px;color:#5b6169;">👁 View only</div>'}
       <div id="syncIndicator" class="small" style="padding:0 20px 6px;color:#5b6169;">Live sync on</div>
       <button class="btn" id="refreshNow" style="margin:0 20px 8px;background:transparent;color:#C9CDD2;border-color:#2a2f36;">🔄 Refresh now</button>
       <button id="logout">Sign out</button>
@@ -312,29 +538,38 @@ function renderShell(){
 }
 function attachShellEvents(){
   document.querySelectorAll('.nav-item').forEach(n=>{ n.onclick = ()=>{ ui.tab=n.dataset.tab; ui.modal=null; render(); }; });
-  document.getElementById('logout').onclick = ()=>{ session=null; pendingRows.clear(); ui={tab:'schedule', weekMonday:getMonday(new Date()), city:ui.city, modal:null, loginStep:'pick', pickedRole:null, loginError:null}; render(); };
+  document.getElementById('logout').onclick = ()=>{
+    session=null; pendingRows.clear(); scheduleCache={}; summaryCache={};
+    stopPolling();
+    ui={tab:'schedule', weekMonday:getMonday(new Date()), city:null, scheduleCity:null, modal:null, loginError:null, loginPins:null};
+    render();
+  };
   document.getElementById('refreshNow').onclick = manualRefresh;
   attachPageEvents();
   if(ui.modal) attachModalEvents();
 }
 function renderPage(){
+  if(!canView(ui.tab)) return `<div class="empty-state"><div class="ico">🔒</div>You don't have access to this section.</div>`;
   switch(ui.tab){
-    case 'schedule': return renderSchedulePage();
-    case 'charity': return renderCharityPage();
-    case 'docs': return renderDocsPage();
-    case 'logistics': return session.role==='manager' ? renderLogisticsPage() : '';
-    case 'badges': return session.role==='manager' ? renderBadgesPage() : '';
-    case 'team': return session.role==='manager' ? renderTeamPage() : '';
+    case 'schedule':  return renderSchedulePage();
+    case 'charity':   return renderCharityPage();
+    case 'docs':      return renderDocsPage();
+    case 'logistics': return renderLogisticsPage();
+    case 'badges':    return renderBadgesPage();
+    case 'team':      return renderTeamPage();
+    case 'retired':   return renderRetiredPage();
     default: return '';
   }
 }
 function attachPageEvents(){
-  if(ui.tab==='schedule') attachScheduleEvents();
-  if(ui.tab==='charity') attachCharityEvents();
-  if(ui.tab==='docs') attachDocsEvents();
-  if(ui.tab==='logistics' && session.role==='manager') attachLogisticsEvents();
-  if(ui.tab==='badges' && session.role==='manager') attachBadgesEvents();
-  if(ui.tab==='team' && session.role==='manager') attachTeamEvents();
+  if(!canView(ui.tab)) return;
+  if(ui.tab==='schedule')  attachScheduleEvents();
+  if(ui.tab==='charity')   attachCharityEvents();
+  if(ui.tab==='docs')      attachDocsEvents();
+  if(ui.tab==='logistics') attachLogisticsEvents();
+  if(ui.tab==='badges')    attachBadgesEvents();
+  if(ui.tab==='team')      attachTeamEvents();
+  if(ui.tab==='retired')   attachRetiredEvents();
 }
 
 /* ---------- GENERIC MODAL ---------- */
