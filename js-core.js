@@ -343,9 +343,27 @@ function renderModal(){
     <h3>${ui.modal.title}</h3>${ui.modal.body}
   </div></div>`;
 }
-function closeModal(){ ui.modal=null; render(); }
+function closeModal(){ ui.modal=null; document.onkeydown = null; render(); }
+
 function attachModalEvents(){
   const ov = document.getElementById('modalOverlay');
-  if(ov) ov.onclick = (e)=>{ if(e.target.id==='modalOverlay') closeModal(); };
+  if(ov){
+    /* Click-outside-to-close, done properly.
+       A `click` fires on the nearest common ancestor of where the press
+       started and where it ended. So selecting the text inside a field and
+       releasing the mouse past the edge of the dialog used to deliver the
+       click to the overlay — and the form closed, losing what you typed.
+       Require the press to BEGIN on the overlay as well, so a drag that
+       started inside the dialog can never close it. */
+    let pressedOnOverlay = false;
+    ov.addEventListener('pointerdown', (e)=>{ pressedOnOverlay = (e.target === ov); });
+    ov.addEventListener('click', (e)=>{
+      if(pressedOnOverlay && e.target === ov) closeModal();
+      pressedOnOverlay = false;
+    });
+    /* Escape closes it too — the reliable way out now that a stray drag
+       no longer does. */
+    document.onkeydown = (e)=>{ if(e.key === 'Escape' && ui.modal) closeModal(); };
+  }
   window.moduleModalAttachers.forEach(fn => fn());
 }
