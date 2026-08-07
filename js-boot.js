@@ -18,23 +18,20 @@
       '</div>';
   }
 
-  /* ---- Pre-flight: is config.js actually on the page? ----
-     A missing or blocked config.js is by far the most common deployment
-     mistake, and it used to surface as a bare "API_URL is not defined"
-     inside the first fetch. Check it up front and say so plainly. */
-  var url = null;
+  /* ---- Pre-flight: do we know where the backend is? ----
+     API_URL now lives inline in index.html precisely so that it cannot go
+     missing. A separate config.js is still honoured if one exists. */
+  var url;
   try{ url = API_URL; }catch(e){ url = undefined; }
   if(typeof url === 'undefined' && typeof window.API_URL !== 'undefined') url = window.API_URL;
 
   if(typeof url === 'undefined'){
-    fail('config.js has not loaded',
+    fail('API_URL is not set',
       'API_URL is not defined',
-      'Every other script on this page loaded fine — only <b>config.js</b> is missing, so the app has no idea which Apps Script URL to call.<br><br>' +
-      '<b>Check, in this order:</b><br>' +
-      '1. <b>Is config.js in the same folder as index.html?</b> It is the one file that is never overwritten by an update, so it is easy to forget when deploying to a new folder or host.<br>' +
-      '2. Open your browser\'s <b>Network</b> tab and reload. Look for the <code>config.js</code> row: <code>404</code> means the file is not there or the name is wrong (it is case-sensitive on most hosts — <code>Config.js</code> will not work).<br>' +
-      '3. If it returns <code>200</code> but the app still fails, check the <b>Console</b> tab. A wrong <code>Content-Type</code> (it must be <code>application/javascript</code> or <code>text/javascript</code>) makes the browser refuse to run the file.<br>' +
-      '4. Confirm the file contains a line starting with <code>const API_URL = \'https://script.google.com/macros/s/…/exec\';</code>');
+      'Every script on this page loaded fine, but nothing told the app which Apps Script URL to call.<br><br>' +
+      '<b>Fix:</b> open <b>index.html</b> and check that this line is present near the bottom, before the other &lt;script&gt; tags:<br>' +
+      '<code>&lt;script&gt;window.API_URL = \'https://script.google.com/macros/s/…/exec\';&lt;/script&gt;</code><br><br>' +
+      'If you are still using a separate <b>config.js</b>, then that file is not being served: check the <b>Network</b> tab for a <code>404</code> on it, and check it is not excluded by <code>.gitignore</code>.');
     return;
   }
 
