@@ -66,6 +66,25 @@
           'If the tab does exist, check it has not been renamed: the names the app expects are listed in <b>Config.gs → SHEETS</b>.');
         return;
       }
+      /* "ensureColumns is not defined" means one .gs file was never pasted.
+         The backend knows which one, so ask it rather than making the reader
+         guess from a bare identifier. */
+      const undef = msg.match(/(\w+) is not defined/);
+      if(undef){
+        gsRun('checkDeployment').then(function(dep){
+          fail('One Apps Script file is out of date',
+            msg + (dep && dep.message ? '\n\n' + dep.message : ''),
+            'The function <code>' + undef[1] + '</code> does not exist in the deployed script, so a file was edited without being pasted in.<br><br>' +
+            (dep && dep.details ? '<b>Paste these files again:</b><br>' + dep.details.map(function(d){
+                return '• <b>' + d.file + '</b> — missing: <code>' + d.missing.join('</code>, <code>') + '</code>';
+              }).join('<br>') + '<br><br>' : '') +
+            'Then <b>Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy</b>. Saving in the editor is not enough.');
+        }).catch(function(){
+          fail('One Apps Script file is out of date', msg,
+            '<code>' + undef[1] + '</code> does not exist in the deployed script — a file was edited without being pasted in. Paste the full set again, then <b>Deploy → Manage deployments → Edit → New version</b>.');
+        });
+        return;
+      }
       if(/Unknown function/i.test(msg)){
         fail('The deployed script is older than this page', msg,
           'The front end is calling a function the deployed backend does not have yet. In Apps Script: <b>Deploy → Manage deployments → Edit (pencil) → Version: New version → Deploy</b>. Saving the code alone does not update the live web app.');
