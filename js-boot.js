@@ -51,11 +51,12 @@
   /* ---- Normal startup ---- */
   (async function(){
     try{
+      /* Only the bootstrap data here. The week can't be loaded yet: which
+         city's schedule to fetch depends on who signs in, so that happens in
+         startSession() once we know. */
       DATA = await gsRun('getBootstrapData');
-      await loadWeek(ui.weekMonday);
       document.getElementById('loading-screen').style.display = 'none';
       render();
-      startPolling();
     }catch(err){
       const msg = (err && err.message) ? err.message : String(err);
 
