@@ -8,9 +8,9 @@
    - Senior Manager / Director: a tab per city, plus an "All cities" tab that
      totals the week across every city.
    - Everyone else: their own city only, no city tabs to get lost in.
-   - Fundraiser: totals only. The per-person £RCP breakdown is hidden, because
-     the Fundraiser login is shared and has no PIN — publishing everyone's
-     performance behind an unauthenticated door would be a poor trade.
+   - Fundraiser: their city's totals plus their OWN line. A colleague's
+     individual £RCP is not theirs to read, so those figures are hidden — both
+     in the Weekly resume and on the day cards.
 
    EOD (End of Day): per person per day per city, a manager records the actual
    canvass hours, admin hours, #RCP and £RCP. £RCP/h is always derived
@@ -27,8 +27,10 @@ function scheduleCityTabs(){
   if(canSeeAllCities()) return [ALL_CITIES].concat(DATA.cities || []);
   return myCity() ? [myCity()] : [];
 }
-/** Per-person EOD figures are for Team Leader and above. */
-function canSeePersonFigures(){ return myLevel() >= 2; }
+/** Whose EOD figures this person may see: everyone's, or only their own. */
+function maySeeFiguresFor(name){
+  return canSeeOthersFigures() || name === session.name;
+}
 
 /** Picks a sane starting city, and repairs an impossible one. */
 function normalizeScheduleCity(){
@@ -165,16 +167,13 @@ function renderWeeklyResume(week){
   const rate = rateOf(totals.rcpValue, totals.canvass);
   const tiles = statTiles(totals, rate, `${totals.eodDays} EOD${totals.eodDays===1?'':'s'} recorded`);
 
-  /* Fundraisers get the city totals but not the person-by-person breakdown. */
-  if(!canSeePersonFigures()){
-    return `<div class="panel">
-      <div class="panel-title">Weekly resume · ${esc(ui.scheduleCity)}</div>
-      ${tiles}
-      <div class="small muted" style="margin-top:12px;">City totals for the week. Individual figures are only visible to team leaders and managers.</div>
-    </div>`;
-  }
+  /* A Fundraiser sees the city totals above, then only their own line —
+     their colleagues' individual figures are not theirs to read. */
+  const visible = canSeeOthersFigures() ? people : people.filter(p => p.name === session.name);
+  const ownOnlyNote = canSeeOthersFigures() ? '' :
+    `<div class="small muted" style="margin-top:10px;">The tiles above are the whole city for the week; the table is your own figures. Your colleagues' individual numbers are only visible to team leaders and managers.</div>`;
 
-  const rows = people.map(p => {
+  const rows = visible.map(p => {
     const r = rateOf(p.rcpValue, p.canvass);
     return `<tr>
       <td>${esc(p.name)}</td>
@@ -186,9 +185,11 @@ function renderWeeklyResume(week){
       <td class="mono">${fmtRate(r)}</td>
       <td class="small muted">${p.eodDays}/${p.days}</td>
     </tr>`;
-  }).join('') || `<tr><td colspan="8" class="muted">No shifts scheduled this week yet.</td></tr>`;
+  }).join('') || `<tr><td colspan="8" class="muted">${canSeeOthersFigures() ? 'No shifts scheduled this week yet.' : 'You have no shifts scheduled this week.'}</td></tr>`;
 
-  const foot = people.length ? `<tfoot><tr class="tot">
+  /* No total row when the table is a single person: repeating their own
+     numbers underneath them would say nothing. */
+  const foot = (canSeeOthersFigures() && people.length) ? `<tfoot><tr class="tot">
       <td>Total</td>
       <td class="mono">${totals.hours.toFixed(2)}h</td>
       <td class="mono">${totals.canvass.toFixed(2)}h</td>
@@ -203,16 +204,17 @@ function renderWeeklyResume(week){
     <div class="panel">
       <div class="panel-title">Weekly resume · ${esc(ui.scheduleCity)}</div>
       ${tiles}
-      <div class="panel-sub">Detail by person</div>
+      <div class="panel-sub">${canSeeOthersFigures() ? 'Detail by person' : 'Your week'}</div>
       <table class="resume-table">
         <thead><tr>
-          <th>Person</th><th>Hours</th><th>Canvass h</th><th>Admin h</th>
+          <th>${canSeeOthersFigures() ? 'Person' : 'You'}</th><th>Hours</th><th>Canvass h</th><th>Admin h</th>
           <th>#RCP</th><th>£RCP</th><th>£RCP/h</th><th>EOD</th>
         </tr></thead>
         <tbody>${rows}</tbody>
         ${foot}
       </table>
       <div class="small muted" style="margin-top:10px;">Hours show the EOD figures (canvass + admin) when an EOD has been recorded for that day, otherwise the scheduled hours. The EOD column counts days recorded out of days scheduled.</div>
+      ${ownOnlyNote}
     </div>`;
 }
 
@@ -273,7 +275,7 @@ function renderCityWeek(){
   if(!week) return `<div class="panel"><div class="small muted">Loading ${esc(ui.scheduleCity)}…</div></div>`;
 
   const canWrite = canEdit();
-  const showFigures = canSeePersonFigures();
+  const showAllFigures = canSeeOthersFigures();
   let dayCols = '';
   for(let i=0;i<7;i++){
     const dateIso = shiftDate(ui.weekMonday,i);
@@ -284,10 +286,10 @@ function renderCityWeek(){
       : (canWrite ? `<button class="add-shift-btn" data-settime="${dateIso}" style="margin-bottom:6px;">+ Set shift time</button>` : `<div class="small muted" style="margin-bottom:6px;">No shift time set</div>`);
 
     const peopleHtml = day.people.map(p=>{
-      const mine = !isAnonymous() && p.employeeName===session.name;
+      const mine = p.employeeName===session.name;
       const isPending = pendingRows.has(p.row);
       const e = em[p.employeeName];
-      const eodLine = (e && showFigures) ? `<div class="eod-mini">
+      const eodLine = (e && maySeeFiguresFor(p.employeeName)) ? `<div class="eod-mini">
           <span>C <strong>${num(e.canvassHours).toFixed(2)}h</strong></span>
           <span>A <strong>${num(e.adminHours).toFixed(2)}h</strong></span>
           <span>#<strong>${num(e.rcpCount)}</strong></span>
@@ -302,7 +304,7 @@ function renderCityWeek(){
       </div>`;
     }).join('');
 
-    const orphanEod = showFigures ? (day.eod || [])
+    const orphanEod = showAllFigures ? (day.eod || [])
       .filter(e => !day.people.some(p => p.employeeName === e.employeeName))
       .map(e => `<div class="shift-card orphan">
         <div class="nm">${esc(e.employeeName)} <span class="badge-tag status-warn">off roster</span></div>
@@ -468,7 +470,7 @@ function openAddPersonModal(day){
         <select id="p_emp">
           <option value="">— choose —</option>
           ${people.map(e=>`<option value="${esc(e.id)}">${esc(e.firstName)} ${esc(e.lastName)} — ${esc(roleLabel(e.role))}${e.city?` (${esc(e.city)})`:''}</option>`).join('')}
-          ${isAnonymous()?'':`<option value="__self__">${esc(session.name)} (me)</option>`}
+          <option value="__self__">${esc(session.name)} (me)</option>
           <option value="__new__">+ New person…</option>
         </select>
       </div>
