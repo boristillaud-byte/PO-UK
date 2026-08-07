@@ -6,9 +6,19 @@
    normal static page like any other, not a page embedded in Google's
    sandboxed iframe.
    ========================================================= */
+/* Resolves the backend URL from whichever place it was set.
+   index.html sets window.API_URL inline. Older deployments used a separate
+   config.js with `const API_URL = …`; that still works and takes priority,
+   so an existing config.js does not need to be deleted. */
+function apiUrl(){
+  if(typeof API_URL !== 'undefined' && API_URL) return API_URL;
+  if(window.API_URL) return window.API_URL;
+  throw new Error('API_URL is not set. Open index.html and check the window.API_URL line near the bottom.');
+}
+
 let gsQueue = Promise.resolve();
 function gsRun(fnName, ...args){
-  const run = () => fetch(API_URL, {
+  const run = () => fetch(apiUrl(), {
     method: 'POST',
     headers: {'Content-Type': 'text/plain;charset=utf-8'}, // keeps this a "simple request" so the browser skips a CORS preflight
     body: JSON.stringify({fn: fnName, args})
