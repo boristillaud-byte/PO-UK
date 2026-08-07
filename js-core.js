@@ -27,26 +27,61 @@ function gsRun(fnName, ...args){
 
 /* =========================================================
    DATE HELPERS (client-side, mirrors SheetUtil.gs logic)
+
+   IMPORTANT — why we never use toISOString() here:
+   toISOString() converts to UTC first. For a browser in BST (UTC+1) local
+   midnight is 23:00 the *previous* day in UTC, so every date came out one
+   day early; for a browser west of UTC (e.g. Toronto) any evening time
+   rolled forward to the next UTC day, so getMonday() could return a
+   Tuesday. Both produced day columns whose header didn't match the data.
+   isoLocal() below reads the calendar fields directly, so the string is
+   always the date the user actually sees on their own clock.
    ========================================================= */
-function todayISO(){ return new Date().toISOString().slice(0,10); }
+function isoLocal(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return y + '-' + m + '-' + day;
+}
+/* Parse a 'YYYY-MM-DD' string into a local Date at midday. Midday, not
+   midnight, so that a DST transition can never tip the date over. */
+function parseIso(iso){
+  const [y, m, d] = String(iso).slice(0, 10).split('-').map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0, 0);
+}
+function todayISO(){ return isoLocal(new Date()); }
 function fmtDate(iso){
   if(!iso) return '';
-  const d = new Date(iso+'T00:00:00');
-  return d.toLocaleDateString('en-GB',{day:'2-digit',month:'short',year:'numeric'});
+  return parseIso(iso).toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
 }
-function addMonths(iso,n){ const d=new Date(iso+'T00:00:00'); d.setMonth(d.getMonth()+n); return d.toISOString().slice(0,10); }
-function daysBetween(a,b){ return Math.round((new Date(b)-new Date(a))/86400000); }
+function addMonths(iso, n){ const d = parseIso(iso); d.setMonth(d.getMonth() + n); return isoLocal(d); }
+function daysBetween(a, b){ return Math.round((parseIso(b) - parseIso(a)) / 86400000); }
 function getMonday(d){
-  const dt=new Date(d); const day=dt.getDay(); const diff = day===0?-6:1-day;
-  dt.setDate(dt.getDate()+diff); return dt.toISOString().slice(0,10);
+  // Normalise to local midday first so the time of day can never shift the date.
+  const src = (d instanceof Date) ? d : parseIso(d);
+  const dt = new Date(src.getFullYear(), src.getMonth(), src.getDate(), 12, 0, 0, 0);
+  const day = dt.getDay();
+  const diff = day === 0 ? -6 : 1 - day;
+  dt.setDate(dt.getDate() + diff);
+  return isoLocal(dt);
 }
-function shiftDate(iso,n){ const d=new Date(iso+'T00:00:00'); d.setDate(d.getDate()+n); return d.toISOString().slice(0,10); }
-const DAY_NAMES=['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
-function computeHours(start,end,breakMin){
-  const [sh,sm]=start.split(':').map(Number); const [eh,em]=end.split(':').map(Number);
-  let mins=(eh*60+em)-(sh*60+sm); if(mins<0) mins+=24*60; mins-=(breakMin||0);
-  return Math.max(0, mins/60);
+function shiftDate(iso, n){ const d = parseIso(iso); d.setDate(d.getDate() + n); return isoLocal(d); }
+const DAY_NAMES = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+function computeHours(start, end, breakMin){
+  const [sh, sm] = start.split(':').map(Number);
+  const [eh, em] = end.split(':').map(Number);
+  let mins = (eh * 60 + em) - (sh * 60 + sm);
+  if(mins < 0) mins += 24 * 60;
+  mins -= (breakMin || 0);
+  return Math.max(0, mins / 60);
 }
+
+/* Money / number formatting used by the schedule + weekly resume. */
+function fmtGBP(n){
+  const v = Number(n) || 0;
+  return '£' + v.toLocaleString('en-GB', {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+function num(v){ const n = Number(v); return isFinite(n) ? n : 0; }
 
 /* =========================================================
    GLOBAL STATE
@@ -56,10 +91,70 @@ let scheduleCache = {};
 let session = null; // {role, employeeId, name, status}
 let ui = { tab:'schedule', weekMonday:getMonday(new Date()), city:null, modal:null, loginStep:'pick', pickedRole:null, loginError:null };
 
+/* Rows the user has just asked to change and that are still in flight.
+   The schedule renderer greys these out so a slow server round-trip never
+   looks like "nothing happened". */
+let pendingRows = new Set();
+
 /* Modules register a function here; it gets called every time a modal is
    rendered, so each module can wire up its own modal's Save/Cancel buttons
    without core.html needing to know anything about them. */
 window.moduleModalAttachers = [];
+
+/* =========================================================
+   FEEDBACK: TOASTS + BUSY BUTTONS
+   Every server call in this app takes a second or two (Apps Script is not
+   fast). Without these two helpers the user clicks Save, nothing visibly
+   happens, and they can't tell whether it worked.
+   ========================================================= */
+function toast(msg, kind){
+  let host = document.getElementById('toastHost');
+  if(!host){
+    host = document.createElement('div');
+    host.id = 'toastHost';
+    document.body.appendChild(host); // outside #root, so render() never wipes it
+  }
+  const t = document.createElement('div');
+  t.className = 'toast toast-' + (kind === 'bad' ? 'bad' : kind === 'info' ? 'info' : 'good');
+  t.innerHTML = '<span class="ic">' + (kind === 'bad' ? '!' : kind === 'info' ? '·' : '✓') + '</span><span class="tx"></span>';
+  t.querySelector('.tx').textContent = msg;
+  host.appendChild(t);
+  const life = kind === 'bad' ? 6000 : 2600;
+  setTimeout(() => { t.classList.add('out'); setTimeout(() => t.remove(), 300); }, life);
+}
+
+/* Puts a button into a spinner state and returns a function that restores it. */
+function setBusy(el, label){
+  if(!el) return function(){};
+  const prevHtml = el.innerHTML;
+  const prevDisabled = el.disabled;
+  const prevWidth = el.style.minWidth;
+  el.style.minWidth = el.offsetWidth + 'px'; // stop the button jumping around
+  el.disabled = true;
+  el.classList.add('is-busy');
+  el.innerHTML = '<span class="spinner"></span>' + (label ? ' ' + label : '');
+  return function restore(){
+    el.innerHTML = prevHtml;
+    el.disabled = prevDisabled;
+    el.classList.remove('is-busy');
+    el.style.minWidth = prevWidth;
+  };
+}
+
+/* safeAction + a spinner on the button that triggered it + a success toast.
+   Use this for anything that writes to the sheet. */
+function safeButtonAction(btn, busyLabel, fn, successMsg){
+  const restore = setBusy(btn, busyLabel);
+  let restored = false;
+  return Promise.resolve()
+    .then(fn)
+    .then(() => { if(successMsg) toast(successMsg, 'good'); })
+    .catch(err => {
+      restore(); restored = true;
+      toast((err && err.message) ? err.message : String(err), 'bad');
+    })
+    .then(() => { if(!restored){ try{ restore(); }catch(e){} } });
+}
 
 /* =========================================================
    LIVE REFRESH (polling)
@@ -83,6 +178,7 @@ function stopPolling(){
 }
 async function pollTick(){
   if(!session || ui.modal) return; // never interrupt an open form
+  if(pendingRows.size) return;     // never re-render on top of a change still in flight
   const active = document.activeElement;
   if(active && ['INPUT','SELECT','TEXTAREA'].includes(active.tagName)) return; // never interrupt typing
   const fn = window.tabRefreshers[ui.tab];
@@ -95,10 +191,13 @@ function updateSyncIndicator(){
   if(el && lastSyncAt) el.textContent = 'Synced ' + lastSyncAt.toLocaleTimeString();
 }
 async function manualRefresh(){
-  const fn = window.tabRefreshers[ui.tab];
-  if(fn) await fn();
-  lastSyncAt = new Date();
-  render();
+  const btn = document.getElementById('refreshNow');
+  await safeButtonAction(btn, 'Refreshing…', async () => {
+    const fn = window.tabRefreshers[ui.tab];
+    if(fn) await fn();
+    lastSyncAt = new Date();
+    render();
+  });
 }
 
 /* Wrap any button click that calls the server: on failure, show the real
@@ -107,7 +206,7 @@ async function safeAction(fn){
   try{ await fn(); }
   catch(err){
     const msg = (err && err.message) ? err.message : String(err);
-    alert('Something went wrong:\n\n' + msg);
+    toast(msg, 'bad');
   }
 }
 
@@ -155,7 +254,7 @@ function attachLoginEvents(){
     b.onclick = ()=>{ ui.pickedRole=b.dataset.role; ui.loginError=null; render(); };
   });
   const go = document.getElementById('loginGo');
-  if(go) go.onclick = ()=> safeAction(async ()=>{
+  if(go) go.onclick = ()=> safeButtonAction(go, 'Signing in…', async ()=>{
     const empId = document.getElementById('loginEmp').value;
     const pin = document.getElementById('loginPin').value;
     if(!empId || !pin) return;
@@ -203,7 +302,7 @@ function renderShell(){
 }
 function attachShellEvents(){
   document.querySelectorAll('.nav-item').forEach(n=>{ n.onclick = ()=>{ ui.tab=n.dataset.tab; ui.modal=null; render(); }; });
-  document.getElementById('logout').onclick = ()=>{ session=null; ui={tab:'schedule', weekMonday:getMonday(new Date()), city:ui.city, modal:null, loginStep:'pick', pickedRole:null, loginError:null}; render(); };
+  document.getElementById('logout').onclick = ()=>{ session=null; pendingRows.clear(); ui={tab:'schedule', weekMonday:getMonday(new Date()), city:ui.city, modal:null, loginStep:'pick', pickedRole:null, loginError:null}; render(); };
   document.getElementById('refreshNow').onclick = manualRefresh;
   attachPageEvents();
   if(ui.modal) attachModalEvents();
@@ -230,7 +329,7 @@ function attachPageEvents(){
 
 /* ---------- GENERIC MODAL ---------- */
 function renderModal(){
-  return `<div class="modal-overlay" id="modalOverlay"><div class="modal-box">
+  return `<div class="modal-overlay" id="modalOverlay"><div class="modal-box ${ui.modal.wide?'wide':''}">
     <h3>${ui.modal.title}</h3>${ui.modal.body}
   </div></div>`;
 }
